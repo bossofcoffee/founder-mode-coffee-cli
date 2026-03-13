@@ -1,0 +1,34 @@
+#!/bin/bash
+
+AMBER='\033[38;2;245;158;11m'
+GREEN='\033[38;2;34;197;94m'
+WHITE='\033[38;2;250;250;250m'
+GRAY='\033[38;2;161;161;170m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+echo ""
+echo -e "${AMBER}${BOLD}  ______                     _             __  __           _      ${RESET}"
+echo -e "${AMBER}${BOLD} |  ____|                   | |           |  \/  |         | |     ${RESET}"
+echo -e "${AMBER}${BOLD} | |__ ___  _   _ _ __   __| | ___ _ __  | \  / | ___   __| | ___ ${RESET}"
+echo -e "${AMBER}${BOLD} |  __/ _ \| | | | '_ \ / _\` |/ _ \ '__| | |\/| |/ _ \ / _\` |/ _ \\${RESET}"
+echo -e "${AMBER}${BOLD} | | | (_) | |_| | | | | (_| |  __/ |    | |  | | (_) | (_| |  __/${RESET}"
+echo -e "${AMBER}${BOLD} |_|  \___/ \__,_|_| |_|\__,_|\___|_|    |_|  |_|\___/ \__,_|\___|${RESET}"
+echo ""
+echo -e "${WHITE}${BOLD}                        C O F F E E${RESET}"
+echo ""
+echo -e "${GREEN}  >_ ${WHITE}Your most profitable habit.${RESET}"
+echo ""
+echo -e "${GRAY}  ──────────────────────────────────────${RESET}"
+echo ""
+echo -e "${WHITE}  ${BOLD}Hello, founder.${RESET}"
+echo ""
+echo -e "${GRAY}  You just ran ${GREEN}brew install founder-mode-coffee${GRAY}.${RESET}"
+echo -e "${GRAY}  That means you're the kind of person who builds things.${RESET}"
+echo ""
+echo -e "${GRAY}  We're brewing something for you.${RESET}"
+echo -e "${GRAY}  Join the waitlist:${RESET} ${AMBER}https://foundermodecoffee.com${RESET}"
+echo -e "${GRAY}  Follow the build:${RESET}  ${AMBER}https://x.com/foundermodecoffee${RESET}"
+echo ""
+echo -e "${GREEN}  $ status: ${WHITE}caffeinated ✓${RESET}"
+echo ""
