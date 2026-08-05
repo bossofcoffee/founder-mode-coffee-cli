@@ -1,0 +1,25 @@
+name: CLI checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        run: bash -n founder-mode-coffee tests/test_cli.sh tests/fixtures/curl
+      - name: Run ShellCheck
+        if: runner.os == 'Linux'
+        run: shellcheck founder-mode-coffee tests/test_cli.sh tests/fixtures/curl
+      - name: Run functional tests
+        run: tests/test_cli.sh

@@ -1,34 +1,837 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -u
 
-AMBER='\033[38;2;245;158;11m'
-GREEN='\033[38;2;34;197;94m'
-WHITE='\033[38;2;250;250;250m'
-GRAY='\033[38;2;161;161;170m'
-BOLD='\033[1m'
-RESET='\033[0m'
+PROGRAM="founder-mode-coffee"
+VERSION="2.0.0"
+AMBER=""
+GREEN=""
+BOLD=""
+RESET=""
 
-echo ""
-echo -e "${AMBER}${BOLD}  ______                     _             __  __           _      ${RESET}"
-echo -e "${AMBER}${BOLD} |  ____|                   | |           |  \/  |         | |     ${RESET}"
-echo -e "${AMBER}${BOLD} | |__ ___  _   _ _ __   __| | ___ _ __  | \  / | ___   __| | ___ ${RESET}"
-echo -e "${AMBER}${BOLD} |  __/ _ \| | | | '_ \ / _\` |/ _ \ '__| | |\/| |/ _ \ / _\` |/ _ \\${RESET}"
-echo -e "${AMBER}${BOLD} | | | (_) | |_| | | | | (_| |  __/ |    | |  | | (_) | (_| |  __/${RESET}"
-echo -e "${AMBER}${BOLD} |_|  \___/ \__,_|_| |_|\__,_|\___|_|    |_|  |_|\___/ \__,_|\___|${RESET}"
-echo ""
-echo -e "${WHITE}${BOLD}                        C O F F E E${RESET}"
-echo ""
-echo -e "${GREEN}  >_ ${WHITE}Your most profitable habit.${RESET}"
-echo ""
-echo -e "${GRAY}  ──────────────────────────────────────${RESET}"
-echo ""
-echo -e "${WHITE}  ${BOLD}Hello, founder.${RESET}"
-echo ""
-echo -e "${GRAY}  You just ran ${GREEN}brew install founder-mode-coffee${GRAY}.${RESET}"
-echo -e "${GRAY}  That means you're the kind of person who builds things.${RESET}"
-echo ""
-echo -e "${GRAY}  We're brewing something for you.${RESET}"
-echo -e "${GRAY}  Join the waitlist:${RESET} ${AMBER}https://foundermodecoffee.com${RESET}"
-echo -e "${GRAY}  Follow the build:${RESET}  ${AMBER}https://x.com/foundermodecoffee${RESET}"
-echo ""
-echo -e "${GREEN}  $ status: ${WHITE}caffeinated ✓${RESET}"
-echo ""
+init_colors() {
+  if [[ -z "${NO_COLOR:-}" && ( -t 1 || "${FMC_FORCE_COLOR:-0}" == "1" ) ]]; then
+    AMBER=$'\033[38;2;245;158;11m'
+    GREEN=$'\033[38;2;34;197;94m'
+    BOLD=$'\033[1m'
+    RESET=$'\033[0m'
+  fi
+}
+
+show_help() {
+  cat <<'EOF'
+Founder Mode Coffee
+Coffee for people building companies.
+
+Usage: founder-mode-coffee [global options] <command> [command options]
+
+Commands:
+  hello                  Show the Founder Mode Coffee welcome
+  ping                   Check in with FMC HQ
+  status                 Show local CLI status
+  doctor                 Check the local setup and API connection
+  config                 Read or change CLI configuration
+  completion             Generate shell completion
+  update                 Check for a newer CLI release
+  help [command]          Show help
+
+Global options:
+  --json                 Print machine-readable JSON
+  --no-color             Disable color output
+  -h, --help             Show help
+  -V, --version          Show version
+EOF
+}
+
+show_command_help() {
+  case "${1:-}" in
+    "") show_help ;;
+    ping) cat <<'EOF'
+Usage: founder-mode-coffee ping [--json]
+
+Send one check-in to FMC HQ. The command has short network timeouts and returns
+non-zero when the API cannot be reached.
+EOF
+      ;;
+    status) cat <<'EOF'
+Usage: founder-mode-coffee status [--json]
+
+Show the CLI version, resolved API endpoint, and config path.
+EOF
+      ;;
+    doctor) cat <<'EOF'
+Usage: founder-mode-coffee doctor [--json]
+
+Check curl, config-directory access, and the FMC API connection.
+EOF
+      ;;
+    config) cat <<'EOF'
+Usage: founder-mode-coffee config <get api|set api URL|path|reset>
+
+FMC_API overrides the saved API URL for one command.
+EOF
+      ;;
+    completion) cat <<'EOF'
+Usage: founder-mode-coffee completion <bash|zsh|fish>
+
+Print a completion script to standard output.
+EOF
+      ;;
+    update) cat <<'EOF'
+Usage: founder-mode-coffee update [--json]
+
+Compare this CLI version with the latest GitHub release.
+EOF
+      ;;
+    hello) printf 'Usage: %s hello\n\nShow the Founder Mode Coffee welcome.\n' "$PROGRAM" ;;
+    help) show_help ;;
+    *) printf 'Error: no help for unknown command: %s\n' "$1" >&2; return 2 ;;
+  esac
+}
+
+show_hello() {
+  printf '\n%bFounder Mode Coffee%b\n' "$AMBER$BOLD" "$RESET"
+  printf '%bCoffee for people building companies.%b\n\n' "$GREEN" "$RESET"
+  printf 'The first roast is in development: https://foundermodecoffee.com\n\n'
+}
+
+CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/founder-mode-coffee"
+CONFIG_FILE="$CONFIG_HOME/config"
+DEFAULT_API="https://foundermodecoffee.com/api"
+
+config_path_accessible() {
+  local path="$CONFIG_HOME"
+  local parent
+  case "$path" in
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  while [[ ! -e "$path" ]]; do
+    parent="${path%/*}"
+    [[ -n "$parent" ]] || parent="/"
+    [[ "$parent" != "$path" ]] || return 1
+    path="$parent"
+  done
+  [[ -d "$path" && -x "$path" ]]
+}
+
+valid_ipv4() {
+  local value="$1" octet i
+  local -a octets
+  IFS=. read -r -a octets <<< "$value"
+  ((${#octets[@]} == 4)) || return 1
+  for i in 0 1 2 3; do
+    octet="${octets[$i]}"
+    [[ "$octet" =~ ^[0-9]+$ && ${#octet} -le 3 ]] || return 1
+    ((10#$octet <= 255)) || return 1
+  done
+}
+
+IPV6_SIDE_COUNT=0
+valid_ipv6_side() {
+  local value="$1" allow_ipv4="$2" group i
+  local -a groups
+  IPV6_SIDE_COUNT=0
+  [[ -n "$value" ]] || return 0
+  [[ "$value" != :* && "$value" != *: ]] || return 1
+  IFS=: read -r -a groups <<< "$value"
+  for ((i = 0; i < ${#groups[@]}; i++)); do
+    group="${groups[$i]}"
+    if [[ "$group" == *.* ]]; then
+      [[ "$allow_ipv4" == true && $i -eq $((${#groups[@]} - 1)) ]] || return 1
+      valid_ipv4 "$group" || return 1
+      IPV6_SIDE_COUNT=$((IPV6_SIDE_COUNT + 2))
+    else
+      [[ "$group" =~ ^[0-9A-Fa-f]{1,4}$ ]] || return 1
+      IPV6_SIDE_COUNT=$((IPV6_SIDE_COUNT + 1))
+    fi
+  done
+}
+
+valid_ipv6() {
+  local value="$1" left right total
+  [[ -n "$value" && "$value" =~ ^[0-9A-Fa-f:.]+$ ]] || return 1
+  if [[ "$value" == *::* ]]; then
+    left="${value%%::*}"
+    right="${value#*::}"
+    [[ "$right" != *::* ]] || return 1
+    valid_ipv6_side "$left" false || return 1
+    total=$IPV6_SIDE_COUNT
+    valid_ipv6_side "$right" true || return 1
+    total=$((total + IPV6_SIDE_COUNT))
+    ((total < 8))
+  else
+    valid_ipv6_side "$value" true || return 1
+    ((IPV6_SIDE_COUNT == 8))
+  fi
+}
+
+valid_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  while [[ ${#port} -gt 1 && "$port" == 0* ]]; do
+    port="${port#0}"
+  done
+  [[ ${#port} -le 5 ]] || return 1
+  ((10#$port >= 1 && 10#$port <= 65535))
+}
+
+valid_hostname() {
+  local host="$1" label i
+  local -a labels
+  [[ -n "$host" && ${#host} -le 253 ]] || return 1
+  if [[ "$host" =~ ^[0-9.]+$ ]]; then
+    valid_ipv4 "$host"
+    return
+  fi
+  [[ "$host" != .* && "$host" != *. && "$host" != *..* ]] || return 1
+  IFS=. read -r -a labels <<< "$host"
+  for ((i = 0; i < ${#labels[@]}; i++)); do
+    label="${labels[$i]}"
+    [[ ${#label} -le 63 && "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+  done
+}
+
+valid_api_url() {
+  local value="$1" authority host port remainder
+  case "$value" in
+    http://*) authority="${value#http://}" ;;
+    https://*) authority="${value#https://}" ;;
+    *) return 1 ;;
+  esac
+  case "$value" in
+    *[[:space:][:cntrl:]]*) return 1 ;;
+    *\?*|*\#*) return 1 ;;
+  esac
+  authority="${authority%%/*}"
+  [[ -n "$authority" ]] || return 1
+  if [[ "$authority" == \[* ]]; then
+    remainder="${authority#\[}"
+    [[ "$remainder" == *\]* ]] || return 1
+    host="${remainder%%\]*}"
+    remainder="${remainder#*\]}"
+    [[ "$remainder" != *\]* ]] || return 1
+    valid_ipv6 "$host" || return 1
+    if [[ -n "$remainder" ]]; then
+      [[ "$remainder" == :* ]] || return 1
+      port="${remainder#:}"
+      valid_port "$port" || return 1
+    fi
+  else
+    [[ "$authority" != *\[* && "$authority" != *\]* && "$authority" != *:*:* ]] || return 1
+    host="${authority%%:*}"
+    valid_hostname "$host" || return 1
+    if [[ "$authority" == *:* ]]; then
+      port="${authority#*:}"
+      valid_port "$port" || return 1
+    fi
+  fi
+}
+
+config_api() {
+  local line
+  if ! config_path_accessible; then
+    printf 'Error: config path is not accessible: %s\n' "$CONFIG_FILE" >&2
+    return 1
+  fi
+  if [[ -e "$CONFIG_FILE" ]]; then
+    if [[ ! -f "$CONFIG_FILE" || ! -r "$CONFIG_FILE" ]]; then
+      printf 'Error: config file is not readable: %s\n' "$CONFIG_FILE" >&2
+      return 1
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        api=*)
+          line="${line#api=}"
+          if ! valid_api_url "$line"; then
+            printf 'Error: saved API URL is invalid.\n' >&2
+            return 1
+          fi
+          printf '%s\n' "${line%/}"
+          return 0
+          ;;
+      esac
+    done < "$CONFIG_FILE"
+  fi
+  printf '%s\n' "$DEFAULT_API"
+}
+
+resolved_api() {
+  if [[ -n "${FMC_API:-}" ]]; then
+    if ! valid_api_url "$FMC_API"; then
+      printf 'Error: FMC_API must be a valid http:// or https:// URL.\n' >&2
+      return 1
+    fi
+    printf '%s\n' "${FMC_API%/}"
+  else
+    config_api
+  fi
+}
+
+json_escape() {
+  local value="$1" control escaped i
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  i=1
+  while ((i <= 31)); do
+    printf -v control '%b' "\\$(printf '%03o' "$i")"
+    case "$i" in
+      8) escaped='\b' ;;
+      9) escaped='\t' ;;
+      10) escaped='\n' ;;
+      12) escaped='\f' ;;
+      13) escaped='\r' ;;
+      *) printf -v escaped '\\u%04x' "$i" ;;
+    esac
+    value="${value//$control/$escaped}"
+    ((i += 1))
+  done
+  control=$'\177'
+  value="${value//$control/\\u007f}"
+  printf '%s' "$value"
+}
+
+run_status() {
+  local api
+  api="$(resolved_api)" || return 1
+  if [[ "${1:-}" == "--json" ]]; then
+    printf '{"command":"status","version":"%s","api":"%s","config":"%s"}\n' \
+      "$(json_escape "$VERSION")" "$(json_escape "$api")" "$(json_escape "$CONFIG_FILE")"
+  else
+    printf 'Founder Mode Coffee CLI\n'
+    printf '  version  %s\n' "$VERSION"
+    printf '  api      %s\n' "$api"
+    printf '  config   %s\n' "$CONFIG_FILE"
+  fi
+}
+
+json_top_value() {
+  local key="$1"
+  local kind="$2"
+  LC_ALL=C awk -v wanted="$key" -v wanted_kind="$kind" '
+    function byte(c) {
+      return index(allbytes, c)
+    }
+    function raw_utf8(first,    lead, needed, min_second, max_second, i, c, octet) {
+      lead = byte(first)
+      if (lead >= 194 && lead <= 223) {
+        needed = 1; min_second = 128; max_second = 191
+      } else if (lead == 224) {
+        needed = 2; min_second = 160; max_second = 191
+      } else if (lead >= 225 && lead <= 236) {
+        needed = 2; min_second = 128; max_second = 191
+      } else if (lead == 237) {
+        needed = 2; min_second = 128; max_second = 159
+      } else if (lead >= 238 && lead <= 239) {
+        needed = 2; min_second = 128; max_second = 191
+      } else if (lead == 240) {
+        needed = 3; min_second = 144; max_second = 191
+      } else if (lead >= 241 && lead <= 243) {
+        needed = 3; min_second = 128; max_second = 191
+      } else if (lead == 244) {
+        needed = 3; min_second = 128; max_second = 143
+      } else return 0
+      if (p + needed - 1 > n) return 0
+      sval = sval first
+      for (i = 1; i <= needed; i++) {
+        c = substr(s, p, 1)
+        octet = byte(c)
+        if (i == 1) {
+          if (octet < min_second || octet > max_second) return 0
+        } else if (octet < 128 || octet > 191) return 0
+        sval = sval c
+        p++
+      }
+      return 1
+    }
+    function ws() {
+      while (p <= n && substr(s, p, 1) ~ /[ \t\r\n]/) p++
+    }
+    function hex_number(text,    i, digit, result) {
+      result = 0
+      for (i = 1; i <= length(text); i++) {
+        digit = index("0123456789abcdef", tolower(substr(text, i, 1))) - 1
+        if (digit < 0) return -1
+        result = result * 16 + digit
+      }
+      return result
+    }
+    function utf8(code) {
+      if (code <= 127) return sprintf("%c", code)
+      if (code <= 2047) return sprintf("%c%c", 192 + int(code / 64), 128 + code % 64)
+      if (code <= 65535) return sprintf("%c%c%c", 224 + int(code / 4096), 128 + int(code / 64) % 64, 128 + code % 64)
+      return sprintf("%c%c%c%c", 240 + int(code / 262144), 128 + int(code / 4096) % 64, 128 + int(code / 64) % 64, 128 + code % 64)
+    }
+    function string(    c, e, hex, lowhex, code, low, count, octet) {
+      if (substr(s, p, 1) != "\"") return 0
+      p++
+      sval = ""
+      count = 0
+      while (p <= n) {
+        c = substr(s, p++, 1)
+        if (c == "\"") {
+          snonempty = (count > 0)
+          return 1
+        }
+        if (c != "\\") {
+          octet = byte(c)
+          if (octet == 0 || (octet >= 1 && octet <= 31)) return 0
+          if (octet >= 128 && !raw_utf8(c)) return 0
+          if (octet <= 127) sval = sval c
+          count++
+          continue
+        }
+        if (p > n) return 0
+        e = substr(s, p++, 1)
+        if (e == "u") {
+          hex = substr(s, p, 4)
+          if (length(hex) != 4 || hex !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) return 0
+          code = hex_number(hex)
+          p += 4
+          if (code >= 55296 && code <= 56319) {
+            if (substr(s, p, 2) != "\\u") return 0
+            lowhex = substr(s, p + 2, 4)
+            if (length(lowhex) != 4 || lowhex !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) return 0
+            low = hex_number(lowhex)
+            if (low < 56320 || low > 57343) return 0
+            code = 65536 + (code - 55296) * 1024 + low - 56320
+            p += 6
+          } else if (code >= 56320 && code <= 57343) return 0
+          sval = sval utf8(code)
+        } else if (e == "\"" || e == "\\" || e == "/") sval = sval e
+        else if (e == "b") sval = sval sprintf("%c", 8)
+        else if (e == "f") sval = sval sprintf("%c", 12)
+        else if (e == "n") sval = sval "\n"
+        else if (e == "r") sval = sval "\r"
+        else if (e == "t") sval = sval "\t"
+        else return 0
+        count++
+      }
+      return 0
+    }
+    function value(    rest) {
+      ws()
+      if (substr(s, p, 1) == "{") return object(0)
+      if (substr(s, p, 1) == "[") return array()
+      if (substr(s, p, 1) == "\"") return string()
+      rest = substr(s, p)
+      if (match(rest, /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) {
+        p += RLENGTH
+        return 1
+      }
+      if (substr(s, p, 4) == "true" || substr(s, p, 4) == "null") { p += 4; return 1 }
+      if (substr(s, p, 5) == "false") { p += 5; return 1 }
+      return 0
+    }
+    function object(top,    key, rest) {
+      if (substr(s, p, 1) != "{") return 0
+      p++
+      ws()
+      if (substr(s, p, 1) == "}") { p++; return 1 }
+      while (p <= n) {
+        if (!string()) return 0
+        key = sval
+        ws()
+        if (substr(s, p, 1) != ":") return 0
+        p++
+        ws()
+        if (top && key == wanted) {
+          if (seen_target) return 0
+          if (wanted_kind == "string") {
+            if (!string() || !snonempty) return 0
+            target = sval
+          } else if (wanted_kind == "uint") {
+            rest = substr(s, p)
+            if (!match(rest, /^(0|[1-9][0-9]*)/)) return 0
+            target = substr(rest, 1, RLENGTH)
+            p += RLENGTH
+          } else return 0
+          seen_target = 1
+        } else if (!value()) return 0
+        ws()
+        if (substr(s, p, 1) == "}") { p++; return 1 }
+        if (substr(s, p, 1) != ",") return 0
+        p++
+        ws()
+      }
+      return 0
+    }
+    function array() {
+      if (substr(s, p, 1) != "[") return 0
+      p++
+      ws()
+      if (substr(s, p, 1) == "]") { p++; return 1 }
+      while (p <= n) {
+        if (!value()) return 0
+        ws()
+        if (substr(s, p, 1) == "]") { p++; return 1 }
+        if (substr(s, p, 1) != ",") return 0
+        p++
+      }
+      return 0
+    }
+    BEGIN {
+      for (i = 1; i <= 255; i++) allbytes = allbytes sprintf("%c", i)
+    }
+    { s = s (NR > 1 ? "\n" : "") $0 }
+    END {
+      n = length(s)
+      p = 1
+      ws()
+      if (!object(1)) exit 1
+      ws()
+      if (p != n + 1 || !seen_target) exit 1
+      printf "%s", target
+    }
+  '
+}
+
+json_top_string() {
+  json_top_value "$1" string
+}
+
+json_top_uint() {
+  json_top_value "$1" uint
+}
+
+JSON_VALUE=""
+capture_json_top_value() {
+  local file="$1" key="$2" kind="$3" marker captured status
+  marker=$'\036'
+  if ! captured="$({
+    json_top_value "$key" "$kind" < "$file"
+    status=$?
+    printf '%s' "$marker"
+    exit "$status"
+  })"; then
+    return 1
+  fi
+  JSON_VALUE="${captured%"$marker"}"
+}
+
+run_ping() {
+  local mode="${1:-}"
+  local api response_file error_file detail message total timestamp
+  api="$(resolved_api)" || return 1
+  command -v curl >/dev/null 2>&1 || {
+    if [[ "$mode" == "--json" ]]; then
+      printf '{"error":"curl is required"}\n'
+    else
+      printf 'Error: curl is required for ping.\n' >&2
+    fi
+    return 1
+  }
+  response_file="$(mktemp "${TMPDIR:-/tmp}/fmc-ping-response.XXXXXX")" || return 1
+  error_file="$(mktemp "${TMPDIR:-/tmp}/fmc-ping-error.XXXXXX")" || {
+    rm -f "$response_file"
+    return 1
+  }
+  if ! curl --globoff --fail --silent --show-error --connect-timeout 5 --max-time 15 -X POST -- "$api/ping" \
+      >"$response_file" 2>"$error_file"; then
+    detail="$(<"$error_file")"
+    rm -f "$response_file" "$error_file"
+    if [[ "$mode" == "--json" ]]; then
+      printf '{"error":"%s","endpoint":"%s"}\n' "$(json_escape "${detail:-connection failed}")" "$(json_escape "$api/ping")"
+    else
+      printf 'Error: could not reach FMC HQ at %s.\n' "$api" >&2
+      [[ -n "$detail" ]] && printf '  %s\n' "$detail" >&2
+    fi
+    return 1
+  fi
+  rm -f "$error_file"
+
+  if [[ "$mode" == "--json" ]]; then
+    if ! json_top_string message < "$response_file" >/dev/null; then
+      rm -f "$response_file"
+      printf '{"error":"FMC HQ returned an unexpected response","endpoint":"%s"}\n' "$(json_escape "$api/ping")"
+      return 1
+    fi
+    command cat "$response_file"
+    rm -f "$response_file"
+    return 0
+  fi
+
+  if capture_json_top_value "$response_file" message string; then
+    message="$JSON_VALUE"
+  else
+    message=""
+  fi
+  if capture_json_top_value "$response_file" total_pings uint; then
+    total="$JSON_VALUE"
+  else
+    total=""
+  fi
+  if capture_json_top_value "$response_file" timestamp string; then
+    timestamp="$JSON_VALUE"
+  else
+    timestamp=""
+  fi
+  rm -f "$response_file"
+  if [[ -z "$message" ]]; then
+    printf 'Error: FMC HQ returned an unexpected response.\n' >&2
+    return 1
+  fi
+  printf '%s\n' "$message"
+  [[ -n "$total" ]] && printf 'Ping %s\n' "$total"
+  [[ -n "$timestamp" ]] && printf '%s\n' "$timestamp"
+  return 0
+}
+
+run_doctor() {
+  local mode="${1:-}"
+  local api curl_ok=false config_ok=false api_ok=false probe
+  api="$(resolved_api)" || return 1
+  command -v curl >/dev/null 2>&1 && curl_ok=true
+  if mkdir -p "$CONFIG_HOME" 2>/dev/null; then
+    probe="$(mktemp "$CONFIG_HOME/.doctor.XXXXXX" 2>/dev/null || true)"
+    if [[ -n "$probe" ]]; then
+      config_ok=true
+      rm -f "$probe"
+    fi
+  fi
+  if [[ "$curl_ok" == true ]] && curl --globoff --fail --silent --show-error --connect-timeout 5 --max-time 10 -- "$api/pings/locations" >/dev/null 2>&1; then
+    api_ok=true
+  fi
+  if [[ "$mode" == "--json" ]]; then
+    printf '{"curl":%s,"config_writable":%s,"api":%s,"endpoint":"%s"}\n' \
+      "$curl_ok" "$config_ok" "$api_ok" "$(json_escape "$api")"
+  else
+    [[ "$curl_ok" == true ]] && printf '[ok] curl\n' || printf '[fail] curl is not installed\n'
+    [[ "$config_ok" == true ]] && printf '[ok] config directory\n' || printf '[fail] config directory is not writable\n'
+    [[ "$api_ok" == true ]] && printf '[ok] API %s\n' "$api" || printf '[fail] API %s\n' "$api"
+  fi
+  [[ "$curl_ok" == true && "$config_ok" == true && "$api_ok" == true ]]
+}
+
+run_completion() {
+  case "${1:-}" in
+    bash)
+      cat <<'EOF'
+_founder_mode_coffee() {
+  local current="${COMP_WORDS[COMP_CWORD]}"
+  local commands="hello ping status doctor config completion update help"
+  COMPREPLY=( $(compgen -W "$commands --help --version --json --no-color" -- "$current") )
+}
+complete -F _founder_mode_coffee founder-mode-coffee
+EOF
+      ;;
+    zsh)
+      cat <<'EOF'
+#compdef founder-mode-coffee
+_founder-mode-coffee() {
+  _arguments \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '(-V --version)'{-V,--version}'[show version]' \
+    '--json[print JSON]' \
+    '--no-color[disable color]' \
+    '1:command:(hello ping status doctor config completion update help)'
+}
+_founder-mode-coffee "$@"
+EOF
+      ;;
+    fish)
+      cat <<'EOF'
+complete -c founder-mode-coffee -f
+complete -c founder-mode-coffee -s h -l help -d 'Show help'
+complete -c founder-mode-coffee -s V -l version -d 'Show version'
+complete -c founder-mode-coffee -l json -d 'Print JSON'
+complete -c founder-mode-coffee -l no-color -d 'Disable color'
+complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'hello ping status doctor config completion update help'
+EOF
+      ;;
+    *)
+      printf 'Usage: %s completion <bash|zsh|fish>\n' "$PROGRAM" >&2
+      return 2
+      ;;
+  esac
+}
+
+version_gt() {
+  local LC_ALL=C
+  local left="${1#v}" right="${2#v}" i av bv
+  local -a a b
+  IFS=. read -r -a a <<< "$left"
+  IFS=. read -r -a b <<< "$right"
+  for i in 0 1 2; do
+    av="${a[$i]:-0}"
+    bv="${b[$i]:-0}"
+    ((${#av} > ${#bv})) && return 0
+    ((${#av} < ${#bv})) && return 1
+    [[ "$av" > "$bv" ]] && return 0
+    [[ "$av" < "$bv" ]] && return 1
+  done
+  return 1
+}
+
+run_update() {
+  local mode="${1:-}" response_file latest url available=false
+  command -v curl >/dev/null 2>&1 || {
+    [[ "$mode" == "--json" ]] && printf '{"error":"curl is required"}\n' || printf 'Error: curl is required for update checks.\n' >&2
+    return 1
+  }
+  response_file="$(mktemp "${TMPDIR:-/tmp}/fmc-update-response.XXXXXX")" || {
+    [[ "$mode" == "--json" ]] && printf '{"error":"update check failed"}\n' || printf 'Error: update check failed.\n' >&2
+    return 1
+  }
+  if ! curl --globoff --fail --silent --show-error --connect-timeout 5 --max-time 15 -- \
+      "https://api.github.com/repos/bossofcoffee/founder-mode-coffee-cli/releases/latest" > "$response_file"; then
+    rm -f "$response_file"
+    [[ "$mode" == "--json" ]] && printf '{"error":"update check failed"}\n' || printf 'Error: update check failed.\n' >&2
+    return 1
+  fi
+  if capture_json_top_value "$response_file" tag_name string; then
+    latest="$JSON_VALUE"
+  else
+    rm -f "$response_file"
+    [[ "$mode" == "--json" ]] && printf '{"error":"GitHub returned an unexpected response"}\n' || printf 'Error: GitHub returned an unexpected response.\n' >&2
+    return 1
+  fi
+  rm -f "$response_file"
+  if [[ ! "$latest" =~ ^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    [[ "$mode" == "--json" ]] && printf '{"error":"GitHub returned an invalid release tag"}\n' || printf 'Error: GitHub returned an invalid release tag.\n' >&2
+    return 1
+  fi
+  url="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/$latest"
+  version_gt "$latest" "$VERSION" && available=true
+  if [[ "$mode" == "--json" ]]; then
+    printf '{"current":"%s","latest":"%s","update_available":%s,"url":"%s"}\n' \
+      "$(json_escape "$VERSION")" "$(json_escape "${latest#v}")" "$available" "$(json_escape "$url")"
+  elif [[ "$available" == true ]]; then
+    printf 'Update available: %s -> %s\n' "$VERSION" "${latest#v}"
+    printf 'Run: brew update && brew upgrade founder-mode-coffee\n'
+    [[ -n "$url" ]] && printf '%s\n' "$url"
+  else
+    printf 'founder-mode-coffee %s is current.\n' "$VERSION"
+  fi
+}
+
+run_config() {
+  local action="${1:-}"
+  local key="${2:-}"
+  local value="${3:-}"
+  local temp_file=""
+  case "$action" in
+    get)
+      [[ "$key" == "api" ]] || { printf 'Error: config key must be "api".\n' >&2; return 2; }
+      config_api
+      ;;
+    set)
+      [[ "$key" == "api" && -n "$value" ]] || { printf 'Usage: %s config set api URL\n' "$PROGRAM" >&2; return 2; }
+      valid_api_url "$value" || { printf 'Error: API URL must be a valid http:// or https:// URL.\n' >&2; return 2; }
+      config_path_accessible || { printf 'Error: config path is not accessible: %s\n' "$CONFIG_FILE" >&2; return 1; }
+      mkdir -p "$CONFIG_HOME" 2>/dev/null || { printf 'Error: could not create config directory: %s\n' "$CONFIG_HOME" >&2; return 1; }
+      temp_file="$(mktemp "$CONFIG_HOME/config.XXXXXX" 2>/dev/null)" || { printf 'Error: could not create config file in %s\n' "$CONFIG_HOME" >&2; return 1; }
+      if ! printf 'api=%s\n' "${value%/}" > "$temp_file"; then
+        rm -f "$temp_file"
+        printf 'Error: could not write config file: %s\n' "$CONFIG_FILE" >&2
+        return 1
+      fi
+      chmod 600 "$temp_file" 2>/dev/null || true
+      if ! mv "$temp_file" "$CONFIG_FILE"; then
+        rm -f "$temp_file"
+        printf 'Error: could not replace config file: %s\n' "$CONFIG_FILE" >&2
+        return 1
+      fi
+      printf 'Saved api in %s\n' "$CONFIG_FILE"
+      ;;
+    path)
+      printf '%s\n' "$CONFIG_FILE"
+      ;;
+    reset)
+      config_path_accessible || { printf 'Error: config path is not accessible: %s\n' "$CONFIG_FILE" >&2; return 1; }
+      rm -f "$CONFIG_FILE" || { printf 'Error: could not reset config file: %s\n' "$CONFIG_FILE" >&2; return 1; }
+      printf 'Configuration reset.\n'
+      ;;
+    *)
+      printf 'Usage: %s config <get api|set api URL|path|reset>\n' "$PROGRAM" >&2
+      return 2
+      ;;
+  esac
+}
+
+GLOBAL_JSON=false
+while (($#)); do
+  case "$1" in
+    --json) GLOBAL_JSON=true; shift ;;
+    --no-color) export NO_COLOR=1; shift ;;
+    -h|--help) show_help; exit 0 ;;
+    -V|--version) printf '%s %s\n' "$PROGRAM" "$VERSION"; exit 0 ;;
+    --) shift; break ;;
+    -*) printf 'Error: unknown option: %s\n' "$1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
+init_colors
+COMMAND="${1:-hello}"
+(($#)) && shift
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  if (($# > 1)); then
+    printf 'Error: %s --help does not accept arguments.\n' "$COMMAND" >&2
+    exit 2
+  fi
+  show_command_help "$COMMAND"
+  exit $?
+fi
+case "$COMMAND" in
+  ping|status|doctor|update)
+    if (($# > 1)) || [[ -n "${1:-}" && "${1:-}" != "--json" ]]; then
+      printf 'Error: unknown option for %s: %s\n' "$COMMAND" "${1:-}" >&2
+      exit 2
+    fi
+    ;;
+  hello)
+    if (($#)); then
+      printf 'Error: hello does not accept arguments.\n' >&2
+      exit 2
+    fi
+    ;;
+  config)
+    case "${1:-}" in
+      get) (($# == 2)) || { printf 'Usage: %s config get api\n' "$PROGRAM" >&2; exit 2; } ;;
+      set) (($# == 3)) || { printf 'Usage: %s config set api URL\n' "$PROGRAM" >&2; exit 2; } ;;
+      path|reset) (($# == 1)) || { printf 'Error: config %s does not accept arguments.\n' "$1" >&2; exit 2; } ;;
+    esac
+    ;;
+  completion)
+    (($# == 1)) || { printf 'Usage: %s completion <bash|zsh|fish>\n' "$PROGRAM" >&2; exit 2; }
+    ;;
+  help)
+    (($# <= 1)) || { printf 'Usage: %s help [command]\n' "$PROGRAM" >&2; exit 2; }
+    ;;
+esac
+MODE=""
+if [[ "$GLOBAL_JSON" == true || "${1:-}" == "--json" ]]; then
+  MODE="--json"
+fi
+
+case "$COMMAND" in
+  help)
+    show_command_help "${1:-}"
+    ;;
+  hello)
+    show_hello
+    ;;
+  config)
+    run_config "${1:-}" "${2:-}" "${3:-}"
+    ;;
+  status)
+    run_status "$MODE"
+    ;;
+  ping)
+    run_ping "$MODE"
+    ;;
+  doctor)
+    run_doctor "$MODE"
+    ;;
+  completion)
+    run_completion "${1:-}"
+    ;;
+  update)
+    run_update "$MODE"
+    ;;
+  *)
+    printf 'Error: unknown command: %s\n' "$COMMAND" >&2
+    printf 'Run "%s --help" to see available commands.\n' "$PROGRAM" >&2
+    exit 2
+    ;;
+esac
