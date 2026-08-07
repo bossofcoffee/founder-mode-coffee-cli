@@ -25,7 +25,7 @@ assert_contains "$output" "completion"
 printf 'PASS: help exposes modern command discovery\n'
 
 output="$($CLI --version)"
-[[ "$output" == "founder-mode-coffee 2.1.0" ]] || fail "unexpected version output: $output"
+[[ "$output" == "founder-mode-coffee 2.2.0" ]] || fail "unexpected version output: $output"
 printf 'PASS: version is stable and script-friendly\n'
 
 XDG_CONFIG_HOME="$TEST_TMP/config" "$CLI" config set api "http://127.0.0.1:8787/api" >/dev/null
@@ -46,7 +46,7 @@ done
 printf 'PASS: config filesystem failures are fatal and never report success\n'
 
 output="$(FMC_API="https://example.test/api" XDG_CONFIG_HOME="$TEST_TMP/status-config" "$CLI" status --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.1.0"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.2.0"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
 printf 'PASS: status supports automation-friendly JSON\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" FMC_API="https://api.test/v1" "$CLI" ping --json)"
@@ -65,7 +65,7 @@ assert_contains "$($CLI completion fish)" "complete -c founder-mode-coffee"
 printf 'PASS: completion supports bash, zsh, and fish\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" "$CLI" update --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.1.0"; assert d["latest"]=="2.2.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.2.0"' "$output" || fail "update check JSON was incorrect"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.2.0"; assert d["latest"]=="2.3.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.3.0"' "$output" || fail "update check JSON was incorrect"
 printf 'PASS: update checks the latest GitHub release\n'
 
 output="$(FMC_API="https://example.test/api" "$CLI" --json status)"
@@ -341,9 +341,9 @@ for response in \
   esac
 done
 
-output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE='{"tag_name":"2.1.1"}' \
+output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE='{"tag_name":"2.2.1"}' \
   "$CLI" update --json)" || fail "update rejected a valid release tag without v"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["latest"]=="2.1.1" and d["update_available"] is True' "$output" \
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["latest"]=="2.2.1" and d["update_available"] is True' "$output" \
   || fail "update mishandled a valid release tag without v"
 huge_version='v2.999999999999999999999999999999999999999999999999.0'
 output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE="{\"tag_name\":\"$huge_version\"}" \
@@ -494,3 +494,50 @@ set -e
 [[ "$(<"$conflict_data/completed/00000001")" == "original archived record" ]] || fail "archived item content was replaced"
 [[ -f "$conflict_data/inbox/00000001" ]] || fail "open item disappeared after archive conflict"
 printf 'PASS: done never overwrites an archived item\n'
+
+interactive_data="$TEST_TMP/interactive-data"
+output="$(printf '%s\n' '/capture Draft the roast update' '/focus Ship the founder brief' '/today' '/quit' | \
+  XDG_DATA_HOME="$interactive_data" "$CLI" interactive)"
+assert_contains "$output" "F M C"
+assert_contains "$output" "Founder Mode Coffee"
+assert_contains "$output" "Captured #1: Draft the roast update"
+assert_contains "$output" "Focus set: Ship the founder brief"
+assert_contains "$output" "[1] Draft the roast update"
+assert_contains "$output" "Session closed."
+printf 'PASS: interactive harness routes slash commands through founder context\n'
+
+help_output="$($CLI --help)"
+assert_contains "$help_output" "interactive"
+output="$($CLI interactive --help)"
+assert_contains "$output" "Usage: founder-mode-coffee interactive"
+for shell in bash zsh fish; do
+  assert_contains "$($CLI completion "$shell")" "interactive"
+done
+printf 'PASS: interactive harness is discoverable\n'
+
+output="$(printf '/quit\n' | FMC_FORCE_INTERACTIVE=1 XDG_DATA_HOME="$TEST_TMP/forced-interactive" "$CLI")"
+assert_contains "$output" "F M C"
+assert_contains "$output" "Session closed."
+printf 'PASS: terminal launches can default to the interactive harness\n'
+
+output="$(FMC_FORCE_INTERACTIVE=1 XDG_DATA_HOME="$TEST_TMP/json-default" "$CLI" --json)"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "focus" in d and "open" in d' "$output" \
+  || fail "global --json without a command opened the interactive harness"
+printf 'PASS: global JSON mode overrides automatic interactive startup\n'
+
+partial_data="$TEST_TMP/partial-input"
+output="$(printf '%s' '/capture Keep the final line' | XDG_DATA_HOME="$partial_data" "$CLI" interactive)"
+assert_contains "$output" "Captured #1: Keep the final line"
+assert_contains "$output" "Session closed."
+printf 'PASS: interactive harness processes a final unterminated line before EOF\n'
+
+quiet_runner="$TEST_TMP/quiet-runner"
+quiet_log="$TEST_TMP/quiet-runner.log"
+# shellcheck disable=SC2016
+printf '%s\n' '#!/usr/bin/env bash' 'printf called >> "$QUIET_LOG"' > "$quiet_runner"
+chmod +x "$quiet_runner"
+output="$(printf '%s\n' '   ' '/ask    ' '/quit' | QUIET_LOG="$quiet_log" FMC_AI_RUNNER="$quiet_runner" \
+  XDG_DATA_HOME="$TEST_TMP/quiet-input" "$CLI" interactive)"
+[[ ! -e "$quiet_log" ]] || fail "whitespace-only input invoked the AI runner"
+assert_contains "$output" "Session closed."
+printf 'PASS: whitespace-only interactive input never invokes AI\n'

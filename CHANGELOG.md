@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.2.0
+
+- Added an interactive founder harness with safe slash-command routing.
+- Added a terminal-safe Founder Mode Coffee ASCII mark.
+- Made no-argument terminal launches interactive while preserving brief output in pipelines.
+- Added bare-text AI handoff through the configured runner.
+- Added interactive help and shell completion discovery.
+
 ## 2.1.0
 
 - Added a local productivity loop with `capture`, `focus`, `today`, and `done`.

@@ -2,7 +2,7 @@
 set -u
 
 PROGRAM="founder-mode-coffee"
-VERSION="2.1.0"
+VERSION="2.2.0"
 AMBER=""
 GREEN=""
 BOLD=""
@@ -25,6 +25,7 @@ Coffee for people building companies.
 Usage: founder-mode-coffee [global options] <command> [command options]
 
 Commands:
+  interactive            Open the interactive founder harness
   capture TEXT           Save a task, idea, or commitment locally
   focus <action>         Set or show the current outcome
   today                  Show the current focus and open work
@@ -51,6 +52,13 @@ EOF
 show_command_help() {
   case "${1:-}" in
     "") show_help ;;
+    interactive) cat <<'EOF'
+Usage: founder-mode-coffee interactive
+
+Open the persistent founder harness. Slash commands update local context; bare
+text is sent to FMC_AI_RUNNER.
+EOF
+      ;;
     capture) cat <<'EOF'
 Usage: founder-mode-coffee capture TEXT
 
@@ -996,13 +1004,96 @@ run_ask() {
   fi
 }
 
+show_coffee_art() {
+  cat <<'EOF'
+
+             ( (
+              ) )
+           .-""""-.
+          /        \__
+         |   F M C   _)
+          \        /
+       ____'-....-'____
+      /________________\
+
+       Founder Mode Coffee
+EOF
+}
+
+show_interactive_help() {
+  cat <<'EOF'
+/capture TEXT   Save work or an idea
+/focus TEXT     Set the current outcome
+/today          Show focus and open work
+/done ID        Complete an open item
+/ask TEXT       Ask the configured AI runner
+/prompt TEXT    Print the prompt without invoking AI
+/ping           Check in with FMC HQ
+/doctor         Check local and server health
+/help           Show these commands
+/clear          Redraw the harness
+/quit           Close the session
+
+Bare text is treated as /ask.
+EOF
+}
+
+run_interactive() {
+  local line id read_status
+  show_coffee_art
+  run_today || return 1
+  printf '\nType /help for commands. Bare text goes to the AI runner.\n'
+  while :; do
+    printf '\nfmc> '
+    read_status=0
+    IFS= read -r line || read_status=$?
+    if [[ $read_status -ne 0 && -z "$line" ]]; then
+      printf '\nSession closed.\n'
+      return 0
+    fi
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    case "$line" in
+      "") ;;
+      /capture\ *) run_capture "${line#/capture }" ;;
+      /focus\ *) run_focus set "${line#/focus }" ;;
+      /today) run_today ;;
+      /done\ *)
+        id="${line#/done }"
+        run_done "$id"
+        ;;
+      /ask) ;;
+      /ask\ *) run_ask "${line#/ask }" ;;
+      /prompt\ *) run_prompt "${line#/prompt }" ;;
+      /ping) run_ping ;;
+      /doctor) run_doctor ;;
+      /help) show_interactive_help ;;
+      /clear)
+        printf '\033[2J\033[H'
+        show_coffee_art
+        run_today
+        ;;
+      /quit|/exit)
+        printf 'Session closed.\n'
+        return 0
+        ;;
+      /*) printf 'Unknown interactive command: %s\n' "$line" >&2 ;;
+      *) run_ask "$line" ;;
+    esac
+    if [[ $read_status -ne 0 ]]; then
+      printf 'Session closed.\n'
+      return 0
+    fi
+  done
+}
+
 run_completion() {
   case "${1:-}" in
     bash)
       cat <<'EOF'
 _founder_mode_coffee() {
   local current="${COMP_WORDS[COMP_CWORD]}"
-  local commands="capture focus today done prompt ask hello ping status doctor config completion update help"
+  local commands="interactive capture focus today done prompt ask hello ping status doctor config completion update help"
   COMPREPLY=( $(compgen -W "$commands --help --version --json --no-color" -- "$current") )
 }
 complete -F _founder_mode_coffee founder-mode-coffee
@@ -1017,7 +1108,7 @@ _founder-mode-coffee() {
     '(-V --version)'{-V,--version}'[show version]' \
     '--json[print JSON]' \
     '--no-color[disable color]' \
-    '1:command:(capture focus today done prompt ask hello ping status doctor config completion update help)'
+    '1:command:(interactive capture focus today done prompt ask hello ping status doctor config completion update help)'
 }
 _founder-mode-coffee "$@"
 EOF
@@ -1029,7 +1120,7 @@ complete -c founder-mode-coffee -s h -l help -d 'Show help'
 complete -c founder-mode-coffee -s V -l version -d 'Show version'
 complete -c founder-mode-coffee -l json -d 'Print JSON'
 complete -c founder-mode-coffee -l no-color -d 'Disable color'
-complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'capture focus today done prompt ask hello ping status doctor config completion update help'
+complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'interactive capture focus today done prompt ask hello ping status doctor config completion update help'
 EOF
       ;;
     *)
@@ -1156,7 +1247,11 @@ while (($#)); do
 done
 
 init_colors
-COMMAND="${1:-today}"
+if (($# == 0)) && [[ "$GLOBAL_JSON" != true && ( "${FMC_FORCE_INTERACTIVE:-0}" == "1" || ( -t 0 && -t 1 ) ) ]]; then
+  COMMAND="interactive"
+else
+  COMMAND="${1:-today}"
+fi
 (($#)) && shift
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   if (($# > 1)); then
@@ -1187,6 +1282,9 @@ case "$COMMAND" in
       printf 'Error: unknown option for today: %s\n' "${1:-}" >&2
       exit 2
     fi
+    ;;
+  interactive)
+    (($# == 0)) || { printf 'Error: interactive does not accept arguments.\n' >&2; exit 2; }
     ;;
   done)
     (($# == 1)) || { printf 'Usage: %s done ID\n' "$PROGRAM" >&2; exit 2; }
@@ -1232,6 +1330,9 @@ case "$COMMAND" in
     ;;
   today)
     run_today "$MODE"
+    ;;
+  interactive)
+    run_interactive
     ;;
   done)
     run_done "$1"
