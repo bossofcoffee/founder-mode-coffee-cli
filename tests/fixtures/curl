@@ -9,13 +9,19 @@ if [[ -n "${MOCK_CURL_LOG:-}" ]]; then
 fi
 
 globoff=false
+location=false
 url=""
 for arg in "$@"; do
   case "$arg" in
     -g|--globoff) globoff=true ;;
+    -L|--location) location=true ;;
     http://*|https://*) url="$arg" ;;
   esac
 done
+if [[ "${MOCK_REQUIRE_LOCATION:-0}" == "1" && "$location" != true ]]; then
+  printf 'Redirecting to https://www.foundermodecoffee.com/api/ping\n'
+  exit 0
+fi
 if [[ -n "${MOCK_CURL_LOG:-}" && "$url" == *\{*,*\}* ]]; then
   if [[ "$globoff" == true ]]; then
     printf 'REQUEST=%s\n' "$url" >> "$MOCK_CURL_LOG"

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.2.1
+
+- Fixed `ping` against the production API by following the canonical HTTPS redirect.
+
 ## 2.2.0
 
 - Added an interactive founder harness with safe slash-command routing.
