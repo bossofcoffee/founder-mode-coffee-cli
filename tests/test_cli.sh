@@ -25,7 +25,7 @@ assert_contains "$output" "completion"
 printf 'PASS: help exposes modern command discovery\n'
 
 output="$($CLI --version)"
-[[ "$output" == "founder-mode-coffee 2.0.0" ]] || fail "unexpected version output: $output"
+[[ "$output" == "founder-mode-coffee 2.1.0" ]] || fail "unexpected version output: $output"
 printf 'PASS: version is stable and script-friendly\n'
 
 XDG_CONFIG_HOME="$TEST_TMP/config" "$CLI" config set api "http://127.0.0.1:8787/api" >/dev/null
@@ -46,7 +46,7 @@ done
 printf 'PASS: config filesystem failures are fatal and never report success\n'
 
 output="$(FMC_API="https://example.test/api" XDG_CONFIG_HOME="$TEST_TMP/status-config" "$CLI" status --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.0.0"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.1.0"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
 printf 'PASS: status supports automation-friendly JSON\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" FMC_API="https://api.test/v1" "$CLI" ping --json)"
@@ -65,7 +65,7 @@ assert_contains "$($CLI completion fish)" "complete -c founder-mode-coffee"
 printf 'PASS: completion supports bash, zsh, and fish\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" "$CLI" update --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.0.0"; assert d["latest"]=="2.1.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.1.0"' "$output" || fail "update check JSON was incorrect"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.1.0"; assert d["latest"]=="2.2.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.2.0"' "$output" || fail "update check JSON was incorrect"
 printf 'PASS: update checks the latest GitHub release\n'
 
 output="$(FMC_API="https://example.test/api" "$CLI" --json status)"
@@ -372,3 +372,125 @@ for invocation in \
   [[ $exit_code -eq 2 ]] || fail "$invocation returned $exit_code instead of rejecting surplus arguments"
 done
 printf 'PASS: command help and surplus argument handling are consistent\n'
+
+productivity_data="$TEST_TMP/productivity-data"
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" capture "Ship the onboarding draft")"
+[[ "$output" == "Captured #1: Ship the onboarding draft" ]] \
+  || fail "capture returned unexpected output: $output"
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" today)"
+assert_contains "$output" "FOCUS  Not set"
+assert_contains "$output" "[1] Ship the onboarding draft"
+printf 'PASS: capture feeds the local daily brief\n'
+
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" focus set "Publish the launch page")"
+[[ "$output" == "Focus set: Publish the launch page" ]] || fail "focus set returned unexpected output: $output"
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" focus show)"
+[[ "$output" == "Publish the launch page" ]] || fail "focus show returned unexpected output: $output"
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" today)"
+assert_contains "$output" "FOCUS  Publish the launch page"
+printf 'PASS: focus sets the outcome shown in the daily brief\n'
+
+XDG_DATA_HOME="$productivity_data" "$CLI" capture "Send the supplier note" >/dev/null
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" "done" 1)"
+[[ "$output" == "Completed #1: Ship the onboarding draft" ]] || fail "done returned unexpected output: $output"
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" today)"
+[[ "$output" != *"Ship the onboarding draft"* ]] || fail "completed item remained in the daily brief"
+assert_contains "$output" "[2] Send the supplier note"
+[[ -f "$productivity_data/founder-mode-coffee/completed/00000001" ]] || fail "completed item was not archived"
+printf 'PASS: done removes an item from the active brief and archives it\n'
+
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" prompt "What should I do next?")"
+assert_contains "$output" "Act as a practical operating partner for a founder."
+assert_contains "$output" "Current focus:"
+assert_contains "$output" "Publish the launch page"
+assert_contains "$output" "[2] Send the supplier note"
+assert_contains "$output" "Request:"
+assert_contains "$output" "What should I do next?"
+[[ "$output" != *"Ship the onboarding draft"* ]] || fail "prompt included a completed item"
+printf 'PASS: prompt turns local founder context into an AI-ready request\n'
+
+ai_runner="$TEST_TMP/fake-ai-runner"
+ai_log="$TEST_TMP/fake-ai-prompt"
+# shellcheck disable=SC2016
+printf '%s\n' '#!/usr/bin/env bash' 'command cat > "$MOCK_AI_LOG"' 'printf "Start with item 2.\\n"' > "$ai_runner"
+chmod +x "$ai_runner"
+output="$(XDG_DATA_HOME="$productivity_data" FMC_AI_RUNNER="$ai_runner" MOCK_AI_LOG="$ai_log" \
+  "$CLI" ask "What should I do next?")"
+[[ "$output" == "Start with item 2." ]] || fail "ask did not preserve runner output: $output"
+assert_contains "$(<"$ai_log")" "Publish the launch page"
+assert_contains "$(<"$ai_log")" "What should I do next?"
+printf 'PASS: ask runs a provider-neutral AI executable with founder context on stdin\n'
+
+mkdir -p "$TEST_TMP/ai-bin"
+# shellcheck disable=SC2016
+printf '%s\n' '#!/usr/bin/env bash' 'for arg in "$@"; do printf "ARG=%s\\n" "$arg" >> "$MOCK_AI_ARGS"; done' 'printf "Hermes response.\\n"' > "$TEST_TMP/ai-bin/hermes"
+chmod +x "$TEST_TMP/ai-bin/hermes"
+hermes_args="$TEST_TMP/hermes-args"
+output="$(PATH="$TEST_TMP/ai-bin:$PATH" XDG_DATA_HOME="$productivity_data" FMC_AI_RUNNER=hermes \
+  MOCK_AI_ARGS="$hermes_args" "$CLI" ask "Choose the next move")"
+[[ "$output" == "Hermes response." ]] || fail "Hermes adapter returned unexpected output: $output"
+assert_contains "$(<"$hermes_args")" $'ARG=chat\nARG=-q'
+assert_contains "$(<"$hermes_args")" "Publish the launch page"
+printf 'PASS: ask adapts founder context to Hermes non-interactive chat\n'
+
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" --json today)"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["focus"]=="Publish the launch page"; assert d["open"]==[{"id":2,"text":"Send the supplier note"}]' "$output" \
+  || fail "global today JSON did not expose the current founder context"
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" today --json)"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["open"][0]["id"]==2' "$output" \
+  || fail "command-local today --json did not return structured context"
+printf 'PASS: today provides structured context for scripts and agents\n'
+
+help_output="$($CLI --help)"
+for command in capture today "done" focus prompt ask; do
+  assert_contains "$help_output" "$command"
+  output="$($CLI "$command" --help)" || fail "$command --help failed"
+  assert_contains "$output" "Usage: founder-mode-coffee $command"
+done
+for shell in bash zsh fish; do
+  completion_output="$($CLI completion "$shell")"
+  for command in capture today "done" focus prompt ask; do
+    assert_contains "$completion_output" "$command"
+  done
+done
+printf 'PASS: productivity and AI commands are discoverable\n'
+
+output="$(XDG_DATA_HOME="$productivity_data" "$CLI" focus clear)"
+[[ "$output" == "Focus cleared." ]] || fail "focus clear returned unexpected output: $output"
+[[ "$(XDG_DATA_HOME="$productivity_data" "$CLI" focus show)" == "Not set" ]] || fail "focus remained set after clear"
+printf 'PASS: focus can be cleared without resetting captured work\n'
+
+concurrent_data="$TEST_TMP/concurrent-data"
+pids=()
+for i in {1..12}; do
+  XDG_DATA_HOME="$concurrent_data" "$CLI" capture "Concurrent item $i" > "$TEST_TMP/concurrent-$i.out" &
+  pids+=("$!")
+done
+capture_failed=false
+for pid in "${pids[@]}"; do
+  wait "$pid" || capture_failed=true
+done
+[[ "$capture_failed" == false ]] || fail "a concurrent capture command failed"
+output="$(XDG_DATA_HOME="$concurrent_data" "$CLI" today --json)"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert len(d["open"])==12; assert sorted(x["id"] for x in d["open"])==list(range(1,13))' "$output" \
+  || fail "concurrent captures reused or lost item IDs"
+printf 'PASS: concurrent captures retain unique ordered IDs\n'
+
+default_output="$(XDG_DATA_HOME="$productivity_data" "$CLI")"
+assert_contains "$default_output" "FOCUS"
+assert_contains "$default_output" "[2] Send the supplier note"
+[[ "$default_output" != *"The first roast is in development"* ]] || fail "default command still opened the welcome screen"
+printf 'PASS: the default command opens the daily operating brief\n'
+
+conflict_data="$TEST_TMP/conflict-data/founder-mode-coffee"
+mkdir -p "$conflict_data/inbox" "$conflict_data/completed"
+printf 'new open record\n' > "$conflict_data/inbox/00000001"
+printf 'original archived record\n' > "$conflict_data/completed/00000001"
+set +e
+XDG_DATA_HOME="$TEST_TMP/conflict-data" "$CLI" "done" 1 > /dev/null 2> "$TEST_TMP/conflict-error"
+exit_code=$?
+set -e
+[[ $exit_code -eq 1 ]] || fail "done overwrote a conflicting archived item"
+[[ "$(<"$conflict_data/completed/00000001")" == "original archived record" ]] || fail "archived item content was replaced"
+[[ -f "$conflict_data/inbox/00000001" ]] || fail "open item disappeared after archive conflict"
+printf 'PASS: done never overwrites an archived item\n'
