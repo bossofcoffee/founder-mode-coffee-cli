@@ -652,8 +652,12 @@ run_doctor() {
 
 release_capture_claim() {
   local claim="$1" expected_owner="$2" owner=""
-  [[ -f "$claim" ]] && IFS= read -r owner < "$claim" || true
-  [[ "$owner" == "$expected_owner" ]] && rm -f "$claim" 2>/dev/null || true
+  if [[ -f "$claim" ]]; then
+    IFS= read -r owner < "$claim" || true
+  fi
+  if [[ "$owner" == "$expected_owner" ]]; then
+    rm -f "$claim" 2>/dev/null || true
+  fi
 }
 
 run_capture() {
@@ -706,7 +710,9 @@ run_capture() {
       rmdir "$claim_file" 2>/dev/null && continue
     else
       claim_owner=""
-      [[ -f "$claim_file" ]] && IFS= read -r claim_owner < "$claim_file" || true
+      if [[ -f "$claim_file" ]]; then
+        IFS= read -r claim_owner < "$claim_file" || true
+      fi
       if [[ "$claim_owner" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$claim_owner" 2>/dev/null; then
         stale_claim="$claim_file.stale.$$"
         if mv "$claim_file" "$stale_claim" 2>/dev/null; then
