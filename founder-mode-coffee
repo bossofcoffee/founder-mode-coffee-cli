@@ -2,7 +2,7 @@
 set -u
 
 PROGRAM="founder-mode-coffee"
-VERSION="2.2.0"
+VERSION="2.2.1"
 AMBER=""
 GREEN=""
 BOLD=""
@@ -581,7 +581,7 @@ run_ping() {
     rm -f "$response_file"
     return 1
   }
-  if ! curl --globoff --fail --silent --show-error --connect-timeout 5 --max-time 15 -X POST -- "$api/ping" \
+  if ! curl --globoff --fail --silent --show-error --location --connect-timeout 5 --max-time 15 -X POST -- "$api/ping" \
       >"$response_file" 2>"$error_file"; then
     detail="$(<"$error_file")"
     rm -f "$response_file" "$error_file"

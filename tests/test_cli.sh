@@ -25,7 +25,7 @@ assert_contains "$output" "completion"
 printf 'PASS: help exposes modern command discovery\n'
 
 output="$($CLI --version)"
-[[ "$output" == "founder-mode-coffee 2.2.0" ]] || fail "unexpected version output: $output"
+[[ "$output" == "founder-mode-coffee 2.2.1" ]] || fail "unexpected version output: $output"
 printf 'PASS: version is stable and script-friendly\n'
 
 XDG_CONFIG_HOME="$TEST_TMP/config" "$CLI" config set api "http://127.0.0.1:8787/api" >/dev/null
@@ -46,12 +46,17 @@ done
 printf 'PASS: config filesystem failures are fatal and never report success\n'
 
 output="$(FMC_API="https://example.test/api" XDG_CONFIG_HOME="$TEST_TMP/status-config" "$CLI" status --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.2.0"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.2.1"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
 printf 'PASS: status supports automation-friendly JSON\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" FMC_API="https://api.test/v1" "$CLI" ping --json)"
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["message"]=="pong"; assert d["total_pings"]==42' "$output" || fail "ping did not preserve API JSON"
 printf 'PASS: ping supports machine-readable output\n'
+
+output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_REQUIRE_LOCATION=1 FMC_API="https://foundermodecoffee.com/api" "$CLI" ping)" \
+  || fail "ping did not follow the production API redirect"
+assert_contains "$output" "pong"
+printf 'PASS: ping follows the production API redirect\n'
 
 doctor_log="$TEST_TMP/doctor-curl.log"
 output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_LOG="$doctor_log" XDG_CONFIG_HOME="$TEST_TMP/doctor-config" FMC_API="https://api.test/v1" "$CLI" doctor --json)"
@@ -65,7 +70,7 @@ assert_contains "$($CLI completion fish)" "complete -c founder-mode-coffee"
 printf 'PASS: completion supports bash, zsh, and fish\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" "$CLI" update --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.2.0"; assert d["latest"]=="2.3.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.3.0"' "$output" || fail "update check JSON was incorrect"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.2.1"; assert d["latest"]=="2.3.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.3.0"' "$output" || fail "update check JSON was incorrect"
 printf 'PASS: update checks the latest GitHub release\n'
 
 output="$(FMC_API="https://example.test/api" "$CLI" --json status)"
@@ -341,9 +346,9 @@ for response in \
   esac
 done
 
-output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE='{"tag_name":"2.2.1"}' \
+output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE='{"tag_name":"2.2.2"}' \
   "$CLI" update --json)" || fail "update rejected a valid release tag without v"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["latest"]=="2.2.1" and d["update_available"] is True' "$output" \
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["latest"]=="2.2.2" and d["update_available"] is True' "$output" \
   || fail "update mishandled a valid release tag without v"
 huge_version='v2.999999999999999999999999999999999999999999999999.0'
 output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE="{\"tag_name\":\"$huge_version\"}" \
