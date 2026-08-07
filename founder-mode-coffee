@@ -2,7 +2,7 @@
 set -u
 
 PROGRAM="founder-mode-coffee"
-VERSION="2.0.0"
+VERSION="2.1.0"
 AMBER=""
 GREEN=""
 BOLD=""
@@ -25,6 +25,12 @@ Coffee for people building companies.
 Usage: founder-mode-coffee [global options] <command> [command options]
 
 Commands:
+  capture TEXT           Save a task, idea, or commitment locally
+  focus <action>         Set or show the current outcome
+  today                  Show the current focus and open work
+  done ID                Complete and archive an open item
+  prompt TEXT            Build an AI prompt from current context
+  ask TEXT               Send current context to an AI runner
   hello                  Show the Founder Mode Coffee welcome
   ping                   Check in with FMC HQ
   status                 Show local CLI status
@@ -45,6 +51,43 @@ EOF
 show_command_help() {
   case "${1:-}" in
     "") show_help ;;
+    capture) cat <<'EOF'
+Usage: founder-mode-coffee capture TEXT
+
+Save one task, idea, or commitment in the local inbox.
+EOF
+      ;;
+    focus) cat <<'EOF'
+Usage: founder-mode-coffee focus <set TEXT|show|clear>
+
+Set, show, or clear the one outcome that matters now.
+EOF
+      ;;
+    today) cat <<'EOF'
+Usage: founder-mode-coffee today [--json]
+
+Show the current focus and open captured work.
+EOF
+      ;;
+    done) cat <<'EOF'
+Usage: founder-mode-coffee done ID
+
+Complete an open item and retain it in the local archive.
+EOF
+      ;;
+    prompt) cat <<'EOF'
+Usage: founder-mode-coffee prompt TEXT
+
+Print an AI-ready request containing the current focus and open work.
+EOF
+      ;;
+    ask) cat <<'EOF'
+Usage: founder-mode-coffee ask TEXT
+
+Send the generated prompt to FMC_AI_RUNNER. Set the runner to "hermes" for
+Hermes Agent, or to an executable that reads the prompt from standard input.
+EOF
+      ;;
     ping) cat <<'EOF'
 Usage: founder-mode-coffee ping [--json]
 
@@ -96,6 +139,11 @@ show_hello() {
 
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/founder-mode-coffee"
 CONFIG_FILE="$CONFIG_HOME/config"
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/founder-mode-coffee"
+INBOX_DIR="$DATA_HOME/inbox"
+COMPLETED_DIR="$DATA_HOME/completed"
+COUNTER_FILE="$DATA_HOME/next-id"
+FOCUS_FILE="$DATA_HOME/focus"
 DEFAULT_API="https://foundermodecoffee.com/api"
 
 config_path_accessible() {
@@ -602,13 +650,359 @@ run_doctor() {
   [[ "$curl_ok" == true && "$config_ok" == true && "$api_ok" == true ]]
 }
 
+release_capture_claim() {
+  local claim="$1" expected_owner="$2" owner=""
+  if [[ -f "$claim" ]]; then
+    IFS= read -r owner < "$claim" || true
+  fi
+  if [[ "$owner" == "$expected_owner" ]]; then
+    rm -f "$claim" 2>/dev/null || true
+  fi
+}
+
+run_capture() {
+  local text="$*" next_id=1 item_name claim_file claim_owner claim_seed stale_claim temp_counter temp_item
+  [[ -n "$text" ]] || { printf 'Usage: %s capture TEXT\n' "$PROGRAM" >&2; return 2; }
+  case "$text" in
+    *$'\n'*|*$'\r'*) printf 'Error: capture accepts one line of text.\n' >&2; return 2 ;;
+  esac
+  if ! mkdir -p "$INBOX_DIR" 2>/dev/null; then
+    printf 'Error: could not create productivity data directory: %s\n' "$INBOX_DIR" >&2
+    return 1
+  fi
+  if [[ -e "$COUNTER_FILE" ]]; then
+    [[ -f "$COUNTER_FILE" && -r "$COUNTER_FILE" ]] || {
+      printf 'Error: productivity counter is not readable: %s\n' "$COUNTER_FILE" >&2
+      return 1
+    }
+    IFS= read -r next_id < "$COUNTER_FILE" || true
+    if [[ "$next_id" == "100000000" ]]; then
+      printf 'Error: productivity item IDs are exhausted.\n' >&2
+      return 1
+    fi
+    [[ "$next_id" =~ ^[1-9][0-9]*$ && ${#next_id} -le 8 ]] || {
+      printf 'Error: productivity counter is invalid: %s\n' "$COUNTER_FILE" >&2
+      return 1
+    }
+  fi
+  claim_seed="$(mktemp "$INBOX_DIR/.claim-owner.XXXXXX" 2>/dev/null)" || {
+    printf 'Error: could not create capture claim.\n' >&2
+    return 1
+  }
+  printf '%s\n' "$$" > "$claim_seed" || { rm -f "$claim_seed"; return 1; }
+  while :; do
+    [[ ${#next_id} -le 8 ]] || {
+      rm -f "$claim_seed"
+      printf 'Error: productivity item IDs are exhausted.\n' >&2
+      return 1
+    }
+    printf -v item_name '%08d' "$next_id"
+    claim_file="$INBOX_DIR/.$item_name.claim"
+    if ln "$claim_seed" "$claim_file" 2>/dev/null; then
+      rm -f "$claim_seed"
+      if [[ ! -e "$INBOX_DIR/$item_name" && ! -e "$COMPLETED_DIR/$item_name" ]]; then
+        break
+      fi
+      release_capture_claim "$claim_file" "$$"
+      claim_seed="$(mktemp "$INBOX_DIR/.claim-owner.XXXXXX")" || return 1
+      printf '%s\n' "$$" > "$claim_seed" || { rm -f "$claim_seed"; return 1; }
+    elif [[ -d "$claim_file" ]]; then
+      rmdir "$claim_file" 2>/dev/null && continue
+    else
+      claim_owner=""
+      if [[ -f "$claim_file" ]]; then
+        IFS= read -r claim_owner < "$claim_file" || true
+      fi
+      if [[ "$claim_owner" =~ ^[1-9][0-9]*$ ]] && ! kill -0 "$claim_owner" 2>/dev/null; then
+        stale_claim="$claim_file.stale.$$"
+        if mv "$claim_file" "$stale_claim" 2>/dev/null; then
+          rm -f "$stale_claim"
+          continue
+        fi
+      fi
+    fi
+    next_id=$((next_id + 1))
+  done
+  temp_item="$(mktemp "$INBOX_DIR/.capture.XXXXXX" 2>/dev/null)" || {
+    release_capture_claim "$claim_file" "$$"
+    printf 'Error: could not create a captured item.\n' >&2
+    return 1
+  }
+  if ! printf '%s\n' "$text" > "$temp_item"; then
+    rm -f "$temp_item"
+    release_capture_claim "$claim_file" "$$"
+    printf 'Error: could not write captured item.\n' >&2
+    return 1
+  fi
+  temp_counter="$(mktemp "$DATA_HOME/.next-id.XXXXXX" 2>/dev/null)" || {
+    rm -f "$temp_item"
+    release_capture_claim "$claim_file" "$$"
+    printf 'Error: could not update productivity counter.\n' >&2
+    return 1
+  }
+  if ! printf '%s\n' "$((next_id + 1))" > "$temp_counter" || ! mv "$temp_counter" "$COUNTER_FILE"; then
+    rm -f "$temp_item" "$temp_counter"
+    release_capture_claim "$claim_file" "$$"
+    printf 'Error: could not update productivity counter.\n' >&2
+    return 1
+  fi
+  if ! mv "$temp_item" "$INBOX_DIR/$item_name"; then
+    rm -f "$temp_item"
+    release_capture_claim "$claim_file" "$$"
+    printf 'Error: could not save captured item.\n' >&2
+    return 1
+  fi
+  release_capture_claim "$claim_file" "$$"
+  printf 'Captured #%s: %s\n' "$next_id" "$text"
+}
+
+RECORD_VALUE=""
+read_productivity_record() {
+  local path="$1" label="$2" line count=0
+  RECORD_VALUE=""
+  [[ -f "$path" && ! -L "$path" && -r "$path" ]] || {
+    printf 'Error: %s is not a readable local record: %s\n' "$label" "$path" >&2
+    return 1
+  }
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    count=$((count + 1))
+    [[ $count -eq 1 ]] || {
+      printf 'Error: %s must contain exactly one line: %s\n' "$label" "$path" >&2
+      return 1
+    }
+    RECORD_VALUE="$line"
+  done < "$path"
+  [[ $count -eq 1 && -n "$RECORD_VALUE" ]] || {
+    printf 'Error: %s must contain one non-empty line: %s\n' "$label" "$path" >&2
+    return 1
+  }
+}
+
+validate_productivity_state() {
+  local path
+  if [[ -e "$FOCUS_FILE" ]]; then
+    read_productivity_record "$FOCUS_FILE" "focus" || return 1
+  fi
+  for path in "$INBOX_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
+    [[ -e "$path" ]] || continue
+    read_productivity_record "$path" "open item" || return 1
+  done
+}
+
+run_done() {
+  local id="$1" item_name item_path archive_claim text
+  [[ "$id" =~ ^[1-9][0-9]*$ && ${#id} -le 8 ]] || {
+    printf 'Error: item ID must be a positive integer.\n' >&2
+    return 2
+  }
+  printf -v item_name '%08d' "$id"
+  item_path="$INBOX_DIR/$item_name"
+  if [[ ! -f "$item_path" || ! -r "$item_path" ]]; then
+    printf 'Error: open item #%s was not found.\n' "$id" >&2
+    return 1
+  fi
+  read_productivity_record "$item_path" "open item" || return 1
+  text="$RECORD_VALUE"
+  mkdir -p "$COMPLETED_DIR" 2>/dev/null || {
+    printf 'Error: could not create completed-item directory: %s\n' "$COMPLETED_DIR" >&2
+    return 1
+  }
+  archive_claim="$COMPLETED_DIR/.$item_name.claim"
+  if ! mkdir "$archive_claim" 2>/dev/null; then
+    printf 'Error: item #%s is already being completed.\n' "$id" >&2
+    return 1
+  fi
+  if [[ -e "$COMPLETED_DIR/$item_name" ]]; then
+    rmdir "$archive_claim" 2>/dev/null || true
+    printf 'Error: archived item #%s already exists.\n' "$id" >&2
+    return 1
+  fi
+  if ! mv "$item_path" "$COMPLETED_DIR/$item_name"; then
+    rmdir "$archive_claim" 2>/dev/null || true
+    printf 'Error: could not complete item #%s.\n' "$id" >&2
+    return 1
+  fi
+  rmdir "$archive_claim" 2>/dev/null || true
+  printf 'Completed #%s: %s\n' "$id" "$text"
+}
+
+run_focus() {
+  local action="${1:-}" text temp_file
+  case "$action" in
+    set)
+      shift
+      text="$*"
+      [[ -n "$text" ]] || { printf 'Usage: %s focus set TEXT\n' "$PROGRAM" >&2; return 2; }
+      case "$text" in
+        *$'\n'*|*$'\r'*) printf 'Error: focus accepts one line of text.\n' >&2; return 2 ;;
+      esac
+      mkdir -p "$DATA_HOME" 2>/dev/null || {
+        printf 'Error: could not create productivity data directory: %s\n' "$DATA_HOME" >&2
+        return 1
+      }
+      temp_file="$(mktemp "$DATA_HOME/.focus.XXXXXX" 2>/dev/null)" || {
+        printf 'Error: could not create focus file.\n' >&2
+        return 1
+      }
+      if ! printf '%s\n' "$text" > "$temp_file" || ! mv "$temp_file" "$FOCUS_FILE"; then
+        rm -f "$temp_file"
+        printf 'Error: could not save focus.\n' >&2
+        return 1
+      fi
+      printf 'Focus set: %s\n' "$text"
+      ;;
+    show)
+      if [[ -e "$FOCUS_FILE" ]]; then
+        read_productivity_record "$FOCUS_FILE" "focus" || return 1
+        printf '%s\n' "$RECORD_VALUE"
+      else
+        printf 'Not set\n'
+      fi
+      ;;
+    clear)
+      if ! rm -f "$FOCUS_FILE"; then
+        printf 'Error: could not clear focus.\n' >&2
+        return 1
+      fi
+      printf 'Focus cleared.\n'
+      ;;
+    *)
+      printf 'Usage: %s focus <set TEXT|show|clear>\n' "$PROGRAM" >&2
+      return 2
+      ;;
+  esac
+}
+
+run_today() {
+  local mode="${1:-}" focus="Not set" path id text found=false first=true
+  validate_productivity_state || return 1
+  if [[ -e "$FOCUS_FILE" ]]; then
+    read_productivity_record "$FOCUS_FILE" "focus" || return 1
+    focus="$RECORD_VALUE"
+  fi
+  if [[ "$mode" == "--json" ]]; then
+    printf '{"focus":"%s","open":[' "$(json_escape "$focus")"
+    for path in "$INBOX_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
+      [[ -f "$path" && -r "$path" ]] || continue
+      id="${path##*/}"
+      while [[ ${#id} -gt 1 && "$id" == 0* ]]; do id="${id#0}"; done
+      read_productivity_record "$path" "open item" || return 1
+    text="$RECORD_VALUE"
+      [[ "$first" == true ]] || printf ','
+      first=false
+      printf '{"id":%s,"text":"%s"}' "$id" "$(json_escape "$text")"
+    done
+    printf ']}\n'
+    return 0
+  fi
+  printf 'FOCUS  %s\n' "$focus"
+  printf '\nOPEN\n'
+  for path in "$INBOX_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
+    [[ -f "$path" && -r "$path" ]] || continue
+    found=true
+    id="${path##*/}"
+    while [[ ${#id} -gt 1 && "$id" == 0* ]]; do id="${id#0}"; done
+    read_productivity_record "$path" "open item" || return 1
+    text="$RECORD_VALUE"
+    printf '  [%s] %s\n' "$id" "$text"
+  done
+  [[ "$found" == true ]] || printf '  Nothing captured.\n'
+}
+
+write_founder_prompt() {
+  local request="$*" focus="Not set" path id text found=false
+  [[ -n "$request" ]] || { printf 'Usage: %s prompt TEXT\n' "$PROGRAM" >&2; return 2; }
+  validate_productivity_state || return 1
+  if [[ -e "$FOCUS_FILE" ]]; then
+    read_productivity_record "$FOCUS_FILE" "focus" || return 1
+    focus="$RECORD_VALUE"
+  fi
+  cat <<'EOF'
+Act as a practical operating partner for a founder.
+Use only the context that matters. State any assumptions. Give a clear recommendation and the next concrete action. Keep the response concise.
+
+Current focus:
+EOF
+  printf '%s\n\n' "$focus"
+  printf 'Open work:\n'
+  for path in "$INBOX_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]; do
+    [[ -f "$path" && -r "$path" ]] || continue
+    found=true
+    id="${path##*/}"
+    while [[ ${#id} -gt 1 && "$id" == 0* ]]; do id="${id#0}"; done
+    read_productivity_record "$path" "open item" || return 1
+    text="$RECORD_VALUE"
+    printf '[%s] %s\n' "$id" "$text"
+  done
+  [[ "$found" == true ]] || printf 'Nothing captured.\n'
+  printf '\nRequest:\n%s\n' "$request"
+}
+
+run_prompt() {
+  write_founder_prompt "$@"
+}
+
+AI_PROMPT_FILE=""
+cleanup_ai_prompt() {
+  [[ -n "$AI_PROMPT_FILE" ]] && rm -f "$AI_PROMPT_FILE"
+  AI_PROMPT_FILE=""
+}
+
+run_ask() {
+  local runner="${FMC_AI_RUNNER:-}" runner_path prompt_file status
+  [[ -n "$runner" ]] || {
+    printf 'Error: set FMC_AI_RUNNER to an executable that reads a prompt from stdin.\n' >&2
+    printf 'Run "%s prompt TEXT" to generate the prompt without invoking AI.\n' "$PROGRAM" >&2
+    return 1
+  }
+  case "$runner" in
+    *$'\n'*|*$'\r'*|*[[:space:]]*)
+      printf 'Error: FMC_AI_RUNNER must name one executable without arguments.\n' >&2
+      return 2
+      ;;
+  esac
+  runner_path="$(command -v "$runner" 2>/dev/null)" || {
+    printf 'Error: AI runner was not found: %s\n' "$runner" >&2
+    return 1
+  }
+  [[ -f "$runner_path" && -x "$runner_path" ]] || {
+    printf 'Error: AI runner is not an executable file: %s\n' "$runner" >&2
+    return 1
+  }
+  prompt_file="$(mktemp "${TMPDIR:-/tmp}/fmc-ai-prompt.XXXXXX")" || {
+    printf 'Error: could not create AI prompt file.\n' >&2
+    return 1
+  }
+  AI_PROMPT_FILE="$prompt_file"
+  trap 'cleanup_ai_prompt' EXIT
+  trap 'exit 1' HUP INT TERM
+  write_founder_prompt "$@" > "$prompt_file"
+  status=$?
+  if [[ $status -ne 0 ]]; then
+    cleanup_ai_prompt
+    trap - EXIT HUP INT TERM
+    return "$status"
+  fi
+  case "$runner" in
+    hermes) "$runner_path" chat -q "$(<"$prompt_file")" ;;
+    *) "$runner_path" < "$prompt_file" ;;
+  esac
+  status=$?
+  cleanup_ai_prompt
+  trap - EXIT HUP INT TERM
+  if [[ $status -ne 0 ]]; then
+    printf 'Error: AI runner exited with status %s.\n' "$status" >&2
+    return 1
+  fi
+}
+
 run_completion() {
   case "${1:-}" in
     bash)
       cat <<'EOF'
 _founder_mode_coffee() {
   local current="${COMP_WORDS[COMP_CWORD]}"
-  local commands="hello ping status doctor config completion update help"
+  local commands="capture focus today done prompt ask hello ping status doctor config completion update help"
   COMPREPLY=( $(compgen -W "$commands --help --version --json --no-color" -- "$current") )
 }
 complete -F _founder_mode_coffee founder-mode-coffee
@@ -623,7 +1017,7 @@ _founder-mode-coffee() {
     '(-V --version)'{-V,--version}'[show version]' \
     '--json[print JSON]' \
     '--no-color[disable color]' \
-    '1:command:(hello ping status doctor config completion update help)'
+    '1:command:(capture focus today done prompt ask hello ping status doctor config completion update help)'
 }
 _founder-mode-coffee "$@"
 EOF
@@ -635,7 +1029,7 @@ complete -c founder-mode-coffee -s h -l help -d 'Show help'
 complete -c founder-mode-coffee -s V -l version -d 'Show version'
 complete -c founder-mode-coffee -l json -d 'Print JSON'
 complete -c founder-mode-coffee -l no-color -d 'Disable color'
-complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'hello ping status doctor config completion update help'
+complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'capture focus today done prompt ask hello ping status doctor config completion update help'
 EOF
       ;;
     *)
@@ -697,7 +1091,7 @@ run_update() {
       "$(json_escape "$VERSION")" "$(json_escape "${latest#v}")" "$available" "$(json_escape "$url")"
   elif [[ "$available" == true ]]; then
     printf 'Update available: %s -> %s\n' "$VERSION" "${latest#v}"
-    printf 'Run: brew update && brew upgrade founder-mode-coffee\n'
+    printf 'Run: curl -fsSL https://foundermodecoffee.com/install.sh | bash\n'
     [[ -n "$url" ]] && printf '%s\n' "$url"
   else
     printf 'founder-mode-coffee %s is current.\n' "$VERSION"
@@ -762,7 +1156,7 @@ while (($#)); do
 done
 
 init_colors
-COMMAND="${1:-hello}"
+COMMAND="${1:-today}"
 (($#)) && shift
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   if (($# > 1)); then
@@ -784,6 +1178,28 @@ case "$COMMAND" in
       printf 'Error: hello does not accept arguments.\n' >&2
       exit 2
     fi
+    ;;
+  capture)
+    (($#)) || { printf 'Usage: %s capture TEXT\n' "$PROGRAM" >&2; exit 2; }
+    ;;
+  today)
+    if (($# > 1)) || [[ -n "${1:-}" && "${1:-}" != "--json" ]]; then
+      printf 'Error: unknown option for today: %s\n' "${1:-}" >&2
+      exit 2
+    fi
+    ;;
+  done)
+    (($# == 1)) || { printf 'Usage: %s done ID\n' "$PROGRAM" >&2; exit 2; }
+    ;;
+  prompt|ask)
+    (($#)) || { printf 'Usage: %s %s TEXT\n' "$PROGRAM" "$COMMAND" >&2; exit 2; }
+    ;;
+  focus)
+    case "${1:-}" in
+      set) (($# >= 2)) || { printf 'Usage: %s focus set TEXT\n' "$PROGRAM" >&2; exit 2; } ;;
+      show|clear) (($# == 1)) || { printf 'Error: focus %s does not accept arguments.\n' "$1" >&2; exit 2; } ;;
+      *) printf 'Usage: %s focus <set TEXT|show|clear>\n' "$PROGRAM" >&2; exit 2 ;;
+    esac
     ;;
   config)
     case "${1:-}" in
@@ -810,6 +1226,24 @@ case "$COMMAND" in
     ;;
   hello)
     show_hello
+    ;;
+  capture)
+    run_capture "$@"
+    ;;
+  today)
+    run_today "$MODE"
+    ;;
+  done)
+    run_done "$1"
+    ;;
+  prompt)
+    run_prompt "$@"
+    ;;
+  ask)
+    run_ask "$@"
+    ;;
+  focus)
+    run_focus "$@"
     ;;
   config)
     run_config "${1:-}" "${2:-}" "${3:-}"

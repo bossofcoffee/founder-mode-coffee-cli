@@ -64,9 +64,9 @@ case "$args" in
     ;;
   *"api.github.com/repos/bossofcoffee/founder-mode-coffee-cli/releases/latest"*)
     printf '%s\n' '{' \
-      '  "html_url": "https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.1.0",' \
+      '  "html_url": "https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.2.0",' \
       '  "author": {"html_url": "https://github.com/example-author"},' \
-      '  "tag_name": "v2.1.0",' \
+      '  "tag_name": "v2.2.0",' \
       '  "assets": [{"uploader": {"html_url": "https://github.com/example-uploader"}}]' \
       '}'
     ;;
