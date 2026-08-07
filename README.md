@@ -10,11 +10,28 @@ The productivity workflow stays on your machine. The CLI reaches the network onl
 curl -fsSL https://foundermodecoffee.com/install.sh | bash
 ```
 
-Run the daily brief:
+Launch the interactive harness in a terminal:
 
 ```bash
 founder-mode-coffee
 ```
+
+The harness opens with the coffee mark, your current brief, and an `fmc>` prompt. Use slash commands to update local context. Bare text goes to the configured AI runner.
+
+```text
+/capture TEXT   Save work or an idea
+/focus TEXT     Set the current outcome
+/today          Show focus and open work
+/done ID        Complete an open item
+/ask TEXT       Ask the configured AI runner
+/prompt TEXT    Print the prompt without invoking AI
+/ping           Check in with FMC HQ
+/doctor         Check local and server health
+/help           Show commands
+/quit           Close the session
+```
+
+When standard input or output is piped, the no-argument command prints the daily brief instead of opening a prompt. `founder-mode-coffee interactive` starts the harness explicitly.
 
 ## The operating loop
 
@@ -75,6 +92,7 @@ The runner value is never evaluated as shell code and cannot contain arguments. 
 ## Commands
 
 ```text
+interactive            Open the interactive founder harness
 capture TEXT           Save a task, idea, or commitment locally
 focus set TEXT          Set the current outcome
 focus show              Print the current outcome
