@@ -22,4 +22,7 @@ jobs:
         if: runner.os == 'Linux'
         run: shellcheck founder-mode-coffee tests/test_cli.sh tests/fixtures/curl
       - name: Run functional tests
-        run: tests/test_cli.sh
+        run: |
+          bash tests/test_cli.sh
+          bash tests/test_network_ux.sh
+          bash tests/test_update_install.sh

@@ -33,6 +33,35 @@ The harness opens with the coffee mark, your current brief, and an `fmc>` prompt
 
 When standard input or output is piped, the no-argument command prints the daily brief instead of opening a prompt. `founder-mode-coffee interactive` starts the harness explicitly.
 
+## FMC network
+
+```bash
+founder-mode-coffee network        # public status and aggregate counts
+founder-mode-coffee checkin        # explicitly check in this installation
+founder-mode-coffee me             # your private check-in history
+founder-mode-coffee net            # local interface, gateway and IPv4 address
+founder-mode-coffee network --json # clean output for scripts
+```
+
+The same commands are available as `/network`, `/checkin`, `/me` and `/net` in the interactive terminal. Startup and `hello` show the ASCII coffee logo; JSON and piped daily briefs never include a banner.
+
+Online means checked in within the last 300 seconds. Checked-in users and total users currently count distinct anonymous CLI installations, not authenticated people; both totals are the same until an account system exists. There is no background heartbeat or automatic check-in. Opening the CLI does not join the network. A check-in is accepted at most once every 30 seconds per identity.
+
+The first explicit `checkin` creates a random private identity in `$XDG_CONFIG_HOME/founder-mode-coffee/identity` (default `~/.config/founder-mode-coffee/identity`). It is stored with mode 0600, sent as a bearer credential only for check-in/private stats, and hashed before server storage. Do not share this file. Losing it creates a new installation identity; there is no account recovery. No email, task content, hostname, or location is included in the check-in payload. Hosting providers still receive normal connection metadata. `net` reads the local routing configuration without scanning devices or requesting a public IP.
+
+Network stats require the website's durable Redis backend. Unconfigured or unavailable services return an error, never invented zeroes. `ping` remains a connectivity probe and does not register a user.
+
+## Updating
+
+```bash
+founder-mode-coffee update --check
+founder-mode-coffee update --install
+```
+
+`update` and `update --json` retain their existing read-only release-check behavior. `--install` is explicit: it downloads the exact release archive and its `.tar.gz.sha256` sidecar from the official repository, verifies SHA-256, archive members, shell syntax and reported version, then atomically replaces the invoked executable. Failure leaves the previous CLI intact. Current or older releases never downgrade the installation. Symlinks/Homebrew packages and source checkouts are not overwritten; use the package manager or website installer instead. No sudo or shell-profile editing is performed.
+
+Release maintainers must upload both `founder-mode-coffee-VERSION.tar.gz` and `founder-mode-coffee-VERSION.tar.gz.sha256`. Beginning with v2.3.0, release archives include checksum sidecars for verified self-updates. Older v2.2.1 installations only support update checks; use the website installer to upgrade them. Update the website installer's pinned version, URL and real checksum together after publishing each release.
+
 ## The operating loop
 
 Capture something before it gets lost:

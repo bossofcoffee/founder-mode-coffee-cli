@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.3.0
+
+- Added FMC network counts, explicit anonymous check-in, and private installation stats.
+- Added local network diagnostics without device scanning or public-IP lookups.
+- Added verified atomic self-updates with managed-install protection.
+- Expanded the startup ASCII logo and interactive command discovery.
+- Added network integration and update safety tests.
+
 ## 2.2.1
 
 - Fixed `ping` against the production API by following the canonical HTTPS redirect.

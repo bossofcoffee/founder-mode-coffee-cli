@@ -2,7 +2,7 @@
 set -u
 
 PROGRAM="founder-mode-coffee"
-VERSION="2.2.1"
+VERSION="2.3.0"
 AMBER=""
 GREEN=""
 BOLD=""
@@ -33,12 +33,16 @@ Commands:
   prompt TEXT            Build an AI prompt from current context
   ask TEXT               Send current context to an AI runner
   hello                  Show the Founder Mode Coffee welcome
-  ping                   Check in with FMC HQ
+  ping                   Probe connectivity to FMC HQ
+  network                Show FMC network status and user counts
+  me                     Show your private FMC check-in stats
+  checkin                Register/check in this CLI installation
+  net                    Show local network diagnostics (no scan)
   status                 Show local CLI status
   doctor                 Check the local setup and API connection
   config                 Read or change CLI configuration
   completion             Generate shell completion
-  update                 Check for a newer CLI release
+  update                 Check releases or install a verified update
   help [command]          Show help
 
 Global options:
@@ -99,8 +103,8 @@ EOF
     ping) cat <<'EOF'
 Usage: founder-mode-coffee ping [--json]
 
-Send one check-in to FMC HQ. The command has short network timeouts and returns
-non-zero when the API cannot be reached.
+Send one connectivity probe to FMC HQ. This does not check in your CLI membership.
+The command has short network timeouts and returns non-zero when the API cannot be reached.
 EOF
       ;;
     status) cat <<'EOF'
@@ -127,10 +131,20 @@ Usage: founder-mode-coffee completion <bash|zsh|fish>
 Print a completion script to standard output.
 EOF
       ;;
+    network|me|checkin|net)
+      printf 'Usage: %s %s [--json]\n\n' "$PROGRAM" "$1"
+      case "$1" in
+        network) printf 'Read FMC aggregate counts. Online means a check-in within 300 seconds.\n' ;;
+        me) printf 'Read your private anonymous installation stats. Run checkin first.\n' ;;
+        checkin) printf 'Create a private local identity and explicitly check in. No email or location is sent.\n' ;;
+        net) printf 'Read interface, gateway and IPv4 address locally; no scan or public-IP lookup.\n' ;;
+      esac ;;
     update) cat <<'EOF'
-Usage: founder-mode-coffee update [--json]
+Usage: founder-mode-coffee update [--check [--json] | --install]
 
-Compare this CLI version with the latest GitHub release.
+Check the latest GitHub release, or explicitly install a verified update.
+Installation validates SHA-256 and version before atomic replacement.
+Homebrew/symlink installations must use their package manager.
 EOF
       ;;
     hello) printf 'Usage: %s hello\n\nShow the Founder Mode Coffee welcome.\n' "$PROGRAM" ;;
@@ -140,6 +154,7 @@ EOF
 }
 
 show_hello() {
+  show_coffee_art
   printf '\n%bFounder Mode Coffee%b\n' "$AMBER$BOLD" "$RESET"
   printf '%bCoffee for people building companies.%b\n\n' "$GREEN" "$RESET"
   printf 'The first roast is in development: https://foundermodecoffee.com\n\n'
@@ -152,7 +167,7 @@ INBOX_DIR="$DATA_HOME/inbox"
 COMPLETED_DIR="$DATA_HOME/completed"
 COUNTER_FILE="$DATA_HOME/next-id"
 FOCUS_FILE="$DATA_HOME/focus"
-DEFAULT_API="https://foundermodecoffee.com/api"
+DEFAULT_API="https://www.foundermodecoffee.com/api"
 
 config_path_accessible() {
   local path="$CONFIG_HOME"
@@ -644,7 +659,7 @@ run_doctor() {
       rm -f "$probe"
     fi
   fi
-  if [[ "$curl_ok" == true ]] && curl --globoff --fail --silent --show-error --connect-timeout 5 --max-time 10 -- "$api/pings/locations" >/dev/null 2>&1; then
+  if [[ "$curl_ok" == true ]] && curl --globoff --fail --silent --show-error --location --connect-timeout 5 --max-time 10 -- "$api/network/health" >/dev/null 2>&1; then
     api_ok=true
   fi
   if [[ "$mode" == "--json" ]]; then
@@ -1005,19 +1020,19 @@ run_ask() {
 }
 
 show_coffee_art() {
+  printf '%b' "$AMBER$BOLD"
   cat <<'EOF'
 
-             ( (
-              ) )
-           .-""""-.
-          /        \__
-         |   F M C   _)
-          \        /
-       ____'-....-'____
-      /________________\
+      ( (       +----------------------------------+
+       ) )      |  F O U N D E R   M O D E         |
+    .-""""-.    |  C O F F E E                     |
+   | F M C  |]  +----------------------------------+
+    '------'       [ terminal / network / work ]
+   ==========      Founder Mode Coffee
 
-       Founder Mode Coffee
 EOF
+  printf '%b' "$RESET"
+  printf '  CLI %s  /help for commands\n' "$VERSION"
 }
 
 show_interactive_help() {
@@ -1028,7 +1043,12 @@ show_interactive_help() {
 /done ID        Complete an open item
 /ask TEXT       Ask the configured AI runner
 /prompt TEXT    Print the prompt without invoking AI
-/ping           Check in with FMC HQ
+/network        Show FMC network status and counts
+/me             Show your private check-in stats
+/checkin        Join/check in to the FMC network
+/net            Show local connection diagnostics
+/update         Check for an update
+/ping           Probe FMC HQ (no registration)
 /doctor         Check local and server health
 /help           Show these commands
 /clear          Redraw the harness
@@ -1065,6 +1085,11 @@ run_interactive() {
       /ask) ;;
       /ask\ *) run_ask "${line#/ask }" ;;
       /prompt\ *) run_prompt "${line#/prompt }" ;;
+      /network) run_network ;;
+      /me) run_identity me ;;
+      /checkin) run_identity checkin ;;
+      /net) run_net ;;
+      /update) run_update ;;
       /ping) run_ping ;;
       /doctor) run_doctor ;;
       /help) show_interactive_help ;;
@@ -1093,7 +1118,7 @@ run_completion() {
       cat <<'EOF'
 _founder_mode_coffee() {
   local current="${COMP_WORDS[COMP_CWORD]}"
-  local commands="interactive capture focus today done prompt ask hello ping status doctor config completion update help"
+  local commands="interactive capture focus today done prompt ask hello ping network me checkin net status doctor config completion update help"
   COMPREPLY=( $(compgen -W "$commands --help --version --json --no-color" -- "$current") )
 }
 complete -F _founder_mode_coffee founder-mode-coffee
@@ -1108,7 +1133,7 @@ _founder-mode-coffee() {
     '(-V --version)'{-V,--version}'[show version]' \
     '--json[print JSON]' \
     '--no-color[disable color]' \
-    '1:command:(interactive capture focus today done prompt ask hello ping status doctor config completion update help)'
+    '1:command:(interactive capture focus today done prompt ask hello ping network me checkin net status doctor config completion update help)'
 }
 _founder-mode-coffee "$@"
 EOF
@@ -1120,7 +1145,7 @@ complete -c founder-mode-coffee -s h -l help -d 'Show help'
 complete -c founder-mode-coffee -s V -l version -d 'Show version'
 complete -c founder-mode-coffee -l json -d 'Print JSON'
 complete -c founder-mode-coffee -l no-color -d 'Disable color'
-complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'interactive capture focus today done prompt ask hello ping status doctor config completion update help'
+complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'interactive capture focus today done prompt ask hello ping network me checkin net status doctor config completion update help'
 EOF
       ;;
     *)
@@ -1180,12 +1205,189 @@ run_update() {
   if [[ "$mode" == "--json" ]]; then
     printf '{"current":"%s","latest":"%s","update_available":%s,"url":"%s"}\n' \
       "$(json_escape "$VERSION")" "$(json_escape "${latest#v}")" "$available" "$(json_escape "$url")"
+  elif [[ "$available" == true && "${UPDATE_INSTALL:-false}" == true ]]; then
+    install_update "$latest"
   elif [[ "$available" == true ]]; then
     printf 'Update available: %s -> %s\n' "$VERSION" "${latest#v}"
     printf 'Run: curl -fsSL https://foundermodecoffee.com/install.sh | bash\n'
     [[ -n "$url" ]] && printf '%s\n' "$url"
   else
     printf 'founder-mode-coffee %s is current.\n' "$VERSION"
+  fi
+}
+
+install_update() (
+  set -e
+  local tag="$1" target="${BASH_SOURCE[0]}" dir stage temp archive expected actual member details
+  [[ "$target" == /* ]] || target="$PWD/$target"
+  # Never modify managed symlinks, source checkouts, or Cellar packages.
+  if [[ -L "$target" || "$target" == */Cellar/* ]]; then
+    printf 'Error: managed/symlink install; use brew upgrade bossofcoffee/founder-mode-coffee/founder-mode-coffee or reinstall to a user-owned directory.\n' >&2; exit 1
+  fi
+  dir="$(cd "$(dirname "$target")" && pwd -P)"
+  if [[ "$dir" == */Cellar/* ]]; then
+    printf 'Error: managed install directory; use brew upgrade instead.\n' >&2; exit 1
+  fi
+  if [[ -e "$dir/.git" ]]; then
+    printf 'Error: refusing to overwrite a source checkout; install a release first.\n' >&2; exit 1
+  fi
+  [[ -w "$dir" && -f "$target" ]] || { printf 'Error: CLI install directory is not writable.\n' >&2; exit 1; }
+  temp="$(mktemp -d "${TMPDIR:-/tmp}/fmc-update.XXXXXX")"
+  stage=""
+  trap 'rm -rf "$temp"; [[ -z "$stage" ]] || rm -f "$stage"' EXIT
+  local name="founder-mode-coffee-${tag#v}.tar.gz"
+  local base="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/download/$tag/$name"
+  archive="$temp/$name"
+  curl --globoff --fail --silent --show-error --location --connect-timeout 5 --max-time 60 --retry 2 -- "$base" > "$archive"
+  expected="$(curl --globoff --fail --silent --show-error --location --connect-timeout 5 --max-time 20 -- "$base.sha256")"
+  expected="${expected%% *}"
+  [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || { printf 'Error: release checksum is missing or invalid.\n' >&2; exit 1; }
+  if command -v sha256sum >/dev/null 2>&1; then actual="$(sha256sum "$archive")";
+  elif command -v shasum >/dev/null 2>&1; then actual="$(shasum -a 256 "$archive")";
+  else printf 'Error: sha256sum or shasum is required.\n' >&2; exit 1; fi
+  [[ "${actual%% *}" == "$expected" ]] || { printf 'Error: checksum verification failed; installed CLI unchanged.\n' >&2; exit 1; }
+  while IFS= read -r member; do
+    case "$member" in founder-mode-coffee|README.md|CHANGELOG.md|LICENSE) ;; *) printf 'Error: unsafe release archive.\n' >&2; exit 1 ;; esac
+  done <<< "$(tar -tzf "$archive")"
+  details="$(tar -tvzf "$archive")"
+  while IFS= read -r member; do [[ "$member" == -* ]] || { printf 'Error: release archive contains non-regular files.\n' >&2; exit 1; }; done <<< "$details"
+  stage="$(mktemp "$dir/.fmc-update.XXXXXX")"
+  tar -xOzf "$archive" founder-mode-coffee > "$stage"
+  bash -n "$stage"
+  chmod 755 "$stage"
+  [[ "$("$stage" --version)" == "$PROGRAM ${tag#v}" ]] || { printf 'Error: release version mismatch; installed CLI unchanged.\n' >&2; exit 1; }
+  mv -f "$stage" "$target"
+  stage=""
+  printf 'Updated %s to %s\n' "$PROGRAM" "${tag#v}"
+)
+
+network_error() {
+  if [[ "$MODE" == "--json" ]]; then
+    printf '{"error":"%s"}\n' "$(json_escape "$1")"
+  else
+    printf 'Error: %s\n' "$1" >&2
+  fi
+  return 1
+}
+
+run_network() {
+  local api file field value
+  api="$(resolved_api)" || return 1
+  command -v curl >/dev/null 2>&1 || { network_error 'curl is required'; return 1; }
+  file="$(mktemp "${TMPDIR:-/tmp}/fmc-network.XXXXXX")" || return 1
+  if ! curl --globoff --fail --silent --show-error --location --connect-timeout 5 --max-time 15 -- "$api/network" > "$file" 2>/dev/null; then
+    rm -f "$file"; network_error 'FMC network unavailable; try again later'; return 1
+  fi
+  for field in status timestamp online_users checked_in_users total_users total_checkins online_window_seconds; do
+    case "$field" in status|timestamp) value=string ;; *) value=uint ;; esac
+    if ! capture_json_top_value "$file" "$field" "$value"; then
+      rm -f "$file"; network_error 'FMC network returned an invalid response'; return 1
+    fi
+  done
+  if [[ "$MODE" == "--json" ]]; then
+    command cat "$file"
+  else
+    printf '\nFMC NETWORK\n'
+    for field in status online_users checked_in_users total_users total_checkins online_window_seconds timestamp; do
+      case "$field" in status|timestamp) value=string ;; *) value=uint ;; esac
+      capture_json_top_value "$file" "$field" "$value"
+      printf '  %-23s %s\n' "${field//_/ }" "$JSON_VALUE"
+    done
+    printf '\nCounts represent anonymous CLI installations, not verified people.\n'
+  fi
+  rm -f "$file"
+}
+
+run_identity() {
+  local action="$1" identity_file="$CONFIG_HOME/identity" token="" seed api file code field
+  if [[ "$action" == checkin && ! -e "$identity_file" ]]; then
+    mkdir -p "$CONFIG_HOME" || return 1
+    seed="$(umask 077; mktemp "$CONFIG_HOME/.identity.XXXXXX")" || return 1
+    token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    if [[ ! "$token" =~ ^[a-f0-9]{64}$ ]] || ! printf '%s\n' "$token" > "$seed"; then
+      rm -f "$seed"; network_error 'Could not create private identity'; return 1
+    fi
+    ln "$seed" "$identity_file" 2>/dev/null || true
+    rm -f "$seed"
+  fi
+  if [[ ! -f "$identity_file" || -L "$identity_file" || ! -r "$identity_file" ]]; then
+    network_error 'No private identity; run founder-mode-coffee checkin first'; return 1
+  fi
+  token="$(<"$identity_file")"
+  [[ "$token" =~ ^[a-f0-9]{64}$ ]] || { network_error 'Private identity file is invalid'; return 1; }
+  api="$(resolved_api)" || return 1
+  command -v curl >/dev/null 2>&1 || { network_error 'curl is required'; return 1; }
+  file="$(mktemp "${TMPDIR:-/tmp}/fmc-identity-response.XXXXXX")" || return 1
+  # Send bearer via stdin config rather than exposing it in process arguments.
+  local method=GET
+  [[ "$action" == checkin ]] && method=POST
+  code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl --config - --globoff --silent --show-error --location --connect-timeout 5 --max-time 15 -X "$method" --output "$file" --write-out '%{http_code}' -- "$api/network/$action" 2>/dev/null)" || code=000
+  if [[ "$code" != 200 ]]; then
+    field='FMC network unavailable; try again later'
+    if capture_json_top_value "$file" error string; then field="$JSON_VALUE"; fi
+    rm -f "$file"; network_error "$field"; return 1
+  fi
+  for field in status first_seen last_seen total_checkins; do
+    local kind=string
+    [[ "$field" == total_checkins ]] && kind=uint
+    if ! capture_json_top_value "$file" "$field" "$kind"; then
+      rm -f "$file"; network_error 'FMC network returned an invalid response'; return 1
+    fi
+  done
+  if [[ "$MODE" == --json ]]; then
+    # Emit only the public contract, never additional upstream fields.
+    printf '{'
+    local separator=""
+    for field in status total_checkins first_seen last_seen; do
+      kind=string; [[ "$field" == total_checkins ]] && kind=uint
+      capture_json_top_value "$file" "$field" "$kind"
+      printf '%s"%s":' "$separator" "$field"
+      if [[ "$kind" == uint ]]; then printf '%s' "$JSON_VALUE"; else printf '"%s"' "$(json_escape "$JSON_VALUE")"; fi
+      separator=,
+    done
+    printf '}\n'
+  else
+    printf '\nYOUR FMC CONNECTION\n'
+    for field in total_checkins first_seen last_seen; do
+      kind=string; [[ "$field" == total_checkins ]] && kind=uint
+      capture_json_top_value "$file" "$field" "$kind"
+      printf '  %-18s %s\n' "${field//_/ }" "$JSON_VALUE"
+    done
+  fi
+  rm -f "$file"
+}
+
+run_net() {
+  local interface="" gateway="" address="" route key value
+  if command -v ip >/dev/null 2>&1; then
+    route="$(ip -4 route show default 2>/dev/null)"
+    read -r -a words <<< "$route"
+    local i
+    for ((i=0; i<${#words[@]}-1; i++)); do
+      case "${words[$i]}" in via) gateway="${words[$((i+1))]}" ;; dev) interface="${words[$((i+1))]}" ;; esac
+    done
+    if [[ -n "$interface" ]]; then
+      address="$(ip -o -4 address show dev "$interface" 2>/dev/null | awk '$3 == "inet" {split($4,a,"/"); print a[1]; exit}')"
+    fi
+  elif command -v route >/dev/null 2>&1 && command -v ifconfig >/dev/null 2>&1; then
+    route="$(route -n get default 2>/dev/null)"
+    interface="$(printf '%s\n' "$route" | awk '$1 == "interface:" {print $2; exit}')"
+    gateway="$(printf '%s\n' "$route" | awk '$1 == "gateway:" {print $2; exit}')"
+    [[ -n "$interface" ]] && address="$(ifconfig "$interface" 2>/dev/null | awk '$1 == "inet" {print $2; exit}')"
+  fi
+  if [[ "$MODE" == --json ]]; then
+    printf '{'
+    local separator=""
+    for key in interface gateway local_address; do
+      case "$key" in interface) value="$interface" ;; gateway) value="$gateway" ;; *) value="$address" ;; esac
+      printf '%s"%s":' "$separator" "$key"
+      if [[ -n "$value" ]]; then printf '"%s"' "$(json_escape "$value")"; else printf null; fi
+      separator=,
+    done
+    printf '}\n'
+  else
+    printf '\nLOCAL NETWORK\n  interface      %s\n  gateway        %s\n  local address  %s\n' "${interface:-unavailable}" "${gateway:-unavailable}" "${address:-unavailable}"
+    printf '\nRead-only; no LAN scan or public-IP lookup.\n'
   fi
 }
 
@@ -1261,8 +1463,20 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   show_command_help "$COMMAND"
   exit $?
 fi
+UPDATE_INSTALL=false
 case "$COMMAND" in
-  ping|status|doctor|update)
+  update)
+    case "${1:-}" in
+      --install)
+        [[ "$GLOBAL_JSON" == false && $# == 1 ]] || { printf 'Error: update --install cannot be combined with JSON or other options.\n' >&2; exit 2; }
+        UPDATE_INSTALL=true; shift ;;
+      --check) shift ;;
+    esac
+    if (($# > 1)) || [[ -n "${1:-}" && "${1:-}" != --json ]]; then
+      printf 'Error: unknown option for update: %s\n' "${1:-}" >&2; exit 2
+    fi
+    ;;
+  ping|status|doctor|network|me|checkin|net)
     if (($# > 1)) || [[ -n "${1:-}" && "${1:-}" != "--json" ]]; then
       printf 'Error: unknown option for %s: %s\n' "$COMMAND" "${1:-}" >&2
       exit 2
@@ -1319,6 +1533,9 @@ if [[ "$GLOBAL_JSON" == true || "${1:-}" == "--json" ]]; then
 fi
 
 case "$COMMAND" in
+  network) run_network ;;
+  me|checkin) run_identity "$COMMAND" ;;
+  net) run_net ;;
   help)
     show_command_help "${1:-}"
     ;;
