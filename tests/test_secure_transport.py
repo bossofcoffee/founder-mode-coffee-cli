@@ -2,7 +2,7 @@
 import json,os,pathlib,subprocess,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix='fmc-security-',dir=os.environ.get('TMPDIR')) as tmp:
- p=pathlib.Path(tmp);(p/'bin').mkdir();log=p/'calls.jsonl'
+ p=pathlib.Path(tmp).resolve();(p/'bin').mkdir();log=p/'calls.jsonl'
  mock=p/'bin'/'curl'
  mock.write_text('''#!/usr/bin/env python3
 import json,os,sys,pathlib
