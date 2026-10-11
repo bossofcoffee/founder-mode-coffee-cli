@@ -317,7 +317,8 @@ class UX(unittest.TestCase):
                 term.finish()
                 self.assertEqual(len(self.requests), 1, 'exit repeated explicit removal')
                 self.assertEqual(identity.read_bytes(), before)
-                self.assertNotIn(b'\x1b[', term.output)
+                # Readline may emit terminal input-mode controls on macOS; NO_COLOR prohibits SGR styling, not line editing.
+                self.assertNotRegex(term.output, rb'\x1b\[[0-9;]*m')
                 self.env.pop('NO_COLOR')
 
     def test_offline_without_identity_stays_local(self):
@@ -371,7 +372,8 @@ class UX(unittest.TestCase):
             term.command('clear')
             term.command('offline')
             term.finish()
-            self.assertNotIn(b'\x1b[', term.output)
+            # Readline may emit terminal input-mode controls on macOS; NO_COLOR prohibits SGR styling, not line editing.
+            self.assertNotRegex(term.output, rb'\x1b\[[0-9;]*m')
             self.env.pop('NO_COLOR', None)
         term = self.terminal()
         self.requests.clear()
