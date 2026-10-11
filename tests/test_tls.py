@@ -15,7 +15,7 @@ class TLS(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='fmc-tls-test-', dir=os.environ.get('TMPDIR'))
         self.addCleanup(self.tmp.cleanup)
-        self.p = Path(self.tmp.name)
+        self.p = Path(self.tmp.name).resolve()
         config = self.p/'test-only-openssl.cnf'
         config.write_text('[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=critical,CA:TRUE\n')
         self.cert = self.p/'test-only-cert.pem'

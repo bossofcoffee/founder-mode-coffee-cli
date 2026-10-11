@@ -13,7 +13,7 @@ class Security(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='fmc-security-', dir=os.environ.get('TMPDIR'))
         self.addCleanup(self.tmp.cleanup)
-        self.p = pathlib.Path(self.tmp.name)
+        self.p = pathlib.Path(self.tmp.name).resolve()
         (self.p/'bin').mkdir()
         self.log = self.p/'calls.jsonl'
         mock = self.p/'bin/curl'
