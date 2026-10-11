@@ -14,15 +14,38 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      CLI_BASH: /bin/bash
     steps:
       - uses: actions/checkout@v4
+      - name: Select system Bash for CLI shebangs and PTYs
+        shell: /bin/bash -e {0}
+        run: |
+          /bin/bash --version
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            [[ "$BASH_VERSION" == 3.2.* ]]
+          fi
+          mkdir -p "$RUNNER_TEMP/fmc-system-bash"
+          ln -s /bin/bash "$RUNNER_TEMP/fmc-system-bash/bash"
+          printf '%s\n' "$RUNNER_TEMP/fmc-system-bash" >> "$GITHUB_PATH"
       - name: Check shell syntax
-        run: bash -n founder-mode-coffee tests/test_cli.sh tests/fixtures/curl
+        shell: /bin/bash -e {0}
+        run: |
+          for file in founder-mode-coffee tests/*.sh tests/fixtures/curl tests/update-fixtures/curl; do
+            /bin/bash -n "$file" || exit
+          done
       - name: Run ShellCheck
         if: runner.os == 'Linux'
-        run: shellcheck founder-mode-coffee tests/test_cli.sh tests/fixtures/curl
+        run: shellcheck founder-mode-coffee tests/*.sh tests/fixtures/curl tests/update-fixtures/curl
       - name: Run functional tests
+        shell: /bin/bash -e {0}
         run: |
-          bash tests/test_cli.sh
-          bash tests/test_network_ux.sh
-          bash tests/test_update_install.sh
+          [[ "$(command -v bash)" == "$RUNNER_TEMP/fmc-system-bash/bash" ]]
+          [[ "$(bash -c 'printf "%s" "$BASH_VERSION"')" == "$BASH_VERSION" ]]
+          /bin/bash tests/test_cli.sh
+          /bin/bash tests/test_network_ux.sh
+          /bin/bash tests/test_update_install.sh
+          python3 tests/test_interactive.py
+          python3 tests/test_secure_transport.py
+          python3 tests/test_security_regressions.py
+          python3 tests/test_tls.py

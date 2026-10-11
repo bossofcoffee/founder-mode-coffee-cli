@@ -2,7 +2,7 @@
 set -u
 
 PROGRAM="founder-mode-coffee"
-VERSION="2.3.0"
+VERSION="2.4.0"
 AMBER=""
 GREEN=""
 BOLD=""
@@ -34,7 +34,9 @@ Commands:
   ask TEXT               Send current context to an AI runner
   hello                  Show the Founder Mode Coffee welcome
   ping                   Probe connectivity to FMC HQ
-  network                Show FMC network status and user counts
+  network                Refresh presence once, then show aggregate counts
+  online                 Open an online interactive session
+  offline                Remove this installation's online lease
   me                     Show your private FMC check-in stats
   checkin                Register/check in this CLI installation
   net                    Show local network diagnostics (no scan)
@@ -59,8 +61,9 @@ show_command_help() {
     interactive) cat <<'EOF'
 Usage: founder-mode-coffee interactive
 
-Open the persistent founder harness. Slash commands update local context; bare
-text is sent to FMC_AI_RUNNER.
+Open the persistent founder harness. Built-in commands work with or without a
+slash. Unrecognized text goes to FMC_AI_RUNNER; ask TEXT always goes to AI.
+Up/Down recalls private local command history in a terminal. Startup never joins.
 EOF
       ;;
     capture) cat <<'EOF'
@@ -131,10 +134,12 @@ Usage: founder-mode-coffee completion <bash|zsh|fish>
 Print a completion script to standard output.
 EOF
       ;;
-    network|me|checkin|net)
+    network|me|checkin|net|online|offline)
       printf 'Usage: %s %s [--json]\n\n' "$PROGRAM" "$1"
       case "$1" in
-        network) printf 'Read FMC aggregate counts. Online means a check-in within 300 seconds.\n' ;;
+        network) printf 'Refresh presence once, then read aggregate counts. No continuous heartbeat.\n' ;;
+        online) printf 'Open an interactive session with quiet 60-second heartbeats after registration.\nWith --json: one presence refresh only; no session or heartbeat.\n' ;;
+        offline) printf 'Remove the online lease; membership and counters are preserved.\n' ;;
         me) printf 'Read your private anonymous installation stats. Run checkin first.\n' ;;
         checkin) printf 'Create a private local identity and explicitly check in. No email or location is sent.\n' ;;
         net) printf 'Read interface, gateway and IPv4 address locally; no scan or public-IP lookup.\n' ;;
@@ -296,6 +301,47 @@ valid_api_url() {
       valid_port "$port" || return 1
     fi
   fi
+  if [[ "$value" == http://* && "$host" != 127.0.0.1 && "$host" != ::1 ]]; then return 1; fi
+}
+
+# Disable user curl configuration before any other argument. Never downgrade TLS.
+curl() {
+  local url="${!#}" result=0
+  local -a transport
+  valid_api_url "$url" || return 1
+  transport=(--proto '=https' --proto-redir '=https' --tlsv1.2)
+  [[ "$url" != http://* ]] || transport=(--proto '=http' --proto-redir '=https' --noproxy '*')
+  command curl --disable "${transport[@]}" "$@" <&0 &
+  CURL_PID=$!
+  wait "$CURL_PID" || result=$?
+  CURL_PID=""
+  return "$result"
+}
+
+valid_timestamp() {
+  [[ "$1" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$ ]]
+}
+
+validate_network_field() {
+  case "$1" in
+    status) [[ "$2" == "${3:-ok}" ]] ;;
+    timestamp|first_seen|last_seen) valid_timestamp "$2" ;;
+    *) return 0 ;;
+  esac
+}
+
+emit_contract() {
+  local file="$1" field kind separator=""
+  shift
+  printf '{'
+  for field in "$@"; do
+    case "$field" in status|timestamp|first_seen|last_seen|message) kind=string ;; *) kind=uint ;; esac
+    capture_json_top_value "$file" "$field" "$kind" || return 1
+    printf '%s"%s": ' "$separator" "$field"
+    if [[ "$kind" == uint ]]; then printf '%s' "$JSON_VALUE"; else printf '"%s"' "$(json_escape "$JSON_VALUE")"; fi
+    separator=,
+  done
+  printf '}\n'
 }
 
 config_api() {
@@ -566,7 +612,7 @@ json_top_uint() {
 
 JSON_VALUE=""
 capture_json_top_value() {
-  local file="$1" key="$2" kind="$3" marker captured status
+  local file="$1" key="$2" kind="$3" marker captured status private_token
   marker=$'\036'
   if ! captured="$({
     json_top_value "$key" "$kind" < "$file"
@@ -577,6 +623,10 @@ capture_json_top_value() {
     return 1
   fi
   JSON_VALUE="${captured%"$marker"}"
+  if [[ -f "$CONFIG_HOME/identity" && ! -L "$CONFIG_HOME/identity" && -O "$CONFIG_HOME/identity" ]]; then
+    private_token="$(<"$CONFIG_HOME/identity")"
+    [[ ! "$private_token" =~ ^[a-f0-9]{64}$ ]] || JSON_VALUE="${JSON_VALUE//"$private_token"/[redacted]}"
+  fi
 }
 
 run_ping() {
@@ -598,7 +648,7 @@ run_ping() {
   }
   if ! curl --globoff --fail --silent --show-error --location --connect-timeout 5 --max-time 15 -X POST -- "$api/ping" \
       >"$response_file" 2>"$error_file"; then
-    detail="$(<"$error_file")"
+    detail='connection failed'
     rm -f "$response_file" "$error_file"
     if [[ "$mode" == "--json" ]]; then
       printf '{"error":"%s","endpoint":"%s"}\n' "$(json_escape "${detail:-connection failed}")" "$(json_escape "$api/ping")"
@@ -611,12 +661,15 @@ run_ping() {
   rm -f "$error_file"
 
   if [[ "$mode" == "--json" ]]; then
-    if ! json_top_string message < "$response_file" >/dev/null; then
+    if ! capture_json_top_value "$response_file" message string; then
       rm -f "$response_file"
       printf '{"error":"FMC HQ returned an unexpected response","endpoint":"%s"}\n' "$(json_escape "$api/ping")"
       return 1
     fi
-    command cat "$response_file"
+    printf '{"message":"%s"' "$(json_escape "$JSON_VALUE")"
+    if capture_json_top_value "$response_file" total_pings uint; then printf ',"total_pings":%s' "$JSON_VALUE"; fi
+    if capture_json_top_value "$response_file" timestamp string && valid_timestamp "$JSON_VALUE"; then printf ',"timestamp":"%s"' "$(json_escape "$JSON_VALUE")"; fi
+    printf '}\n'
     rm -f "$response_file"
     return 0
   fi
@@ -632,7 +685,8 @@ run_ping() {
     total=""
   fi
   if capture_json_top_value "$response_file" timestamp string; then
-    timestamp="$JSON_VALUE"
+    timestamp=""
+    if valid_timestamp "$JSON_VALUE"; then timestamp="$JSON_VALUE"; fi
   else
     timestamp=""
   fi
@@ -966,6 +1020,25 @@ run_prompt() {
 }
 
 AI_PROMPT_FILE=""
+AI_PID=""
+AI_RUNNER_PID=""
+stop_ai_runner() {
+  if [[ -n "$AI_RUNNER_PID" ]]; then
+    kill "$AI_RUNNER_PID" 2>/dev/null || true
+    kill -KILL "$AI_RUNNER_PID" 2>/dev/null || true
+    wait "$AI_RUNNER_PID" 2>/dev/null || true
+    AI_RUNNER_PID=""
+  fi
+}
+
+stop_ai() {
+  if [[ -n "$AI_PID" ]]; then
+    kill "$AI_PID" 2>/dev/null || true
+    wait "$AI_PID" 2>/dev/null || true
+    AI_PID=""
+  fi
+}
+
 cleanup_ai_prompt() {
   [[ -n "$AI_PROMPT_FILE" ]] && rm -f "$AI_PROMPT_FILE"
   AI_PROMPT_FILE=""
@@ -997,22 +1070,36 @@ run_ask() {
     return 1
   }
   AI_PROMPT_FILE="$prompt_file"
-  trap 'cleanup_ai_prompt' EXIT
-  trap 'exit 1' HUP INT TERM
+
   write_founder_prompt "$@" > "$prompt_file"
   status=$?
   if [[ $status -ne 0 ]]; then
     cleanup_ai_prompt
-    trap - EXIT HUP INT TERM
+
     return "$status"
   fi
-  case "$runner" in
-    hermes) "$runner_path" chat -q "$(<"$prompt_file")" ;;
-    *) "$runner_path" < "$prompt_file" ;;
-  esac
-  status=$?
+  # The parent waits on an owned job, not a foreground subshell: signals can
+  # interrupt wait. This job owns/reaps only its runner and never session traps.
+  (
+    trap 'stop_ai_runner' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    case "$runner" in
+      hermes) "$runner_path" chat --query-file - < "$prompt_file" & ;;
+      *) "$runner_path" < "$prompt_file" & ;;
+    esac
+    AI_RUNNER_PID=$!
+    status=0
+    wait "$AI_RUNNER_PID" || status=$?
+    AI_RUNNER_PID=""
+    exit "$status"
+  ) &
+  AI_PID=$!
+  status=0
+  wait "$AI_PID" || status=$?
+  AI_PID=""
   cleanup_ai_prompt
-  trap - EXIT HUP INT TERM
   if [[ $status -ne 0 ]]; then
     printf 'Error: AI runner exited with status %s.\n' "$status" >&2
     return 1
@@ -1020,7 +1107,7 @@ run_ask() {
 }
 
 show_coffee_art() {
-  printf '%b' "$AMBER$BOLD"
+  printf '%b' "${ACCENT:-$AMBER}$BOLD"
   cat <<'EOF'
 
       ( (       +----------------------------------+
@@ -1032,79 +1119,186 @@ show_coffee_art() {
 
 EOF
   printf '%b' "$RESET"
-  printf '  CLI %s  /help for commands\n' "$VERSION"
+  printf '  CLI %s  help for commands (/help also works)\n' "$VERSION"
 }
 
 show_interactive_help() {
   cat <<'EOF'
-/capture TEXT   Save work or an idea
-/focus TEXT     Set the current outcome
-/today          Show focus and open work
-/done ID        Complete an open item
-/ask TEXT       Ask the configured AI runner
-/prompt TEXT    Print the prompt without invoking AI
-/network        Show FMC network status and counts
-/me             Show your private check-in stats
-/checkin        Join/check in to the FMC network
-/net            Show local connection diagnostics
-/update         Check for an update
-/ping           Probe FMC HQ (no registration)
-/doctor         Check local and server health
-/help           Show these commands
-/clear          Redraw the harness
-/quit           Close the session
+capture TEXT    Save work or an idea
+focus set TEXT  Set the current outcome (focus TEXT also works)
+focus show      Show the current outcome; focus clear removes it
+today           Show focus and open work
+done ID         Complete an open item
+ask TEXT        Always ask AI, even when TEXT starts with a command word
+prompt TEXT     Print the prompt without invoking AI
+network         Refresh presence once and show aggregate counts
+online          Register presence and start quiet session heartbeats
+offline         Stop heartbeats and remove the online lease
+status          Show local setup
+me              Show your private check-in stats
+checkin         Explicitly check in to the FMC network
+net             Show local connection diagnostics
+update          Check for an update
+ping            Probe FMC HQ (no registration)
+doctor          Check local and server health
+config          Read or change API configuration
+completion      Print shell completion
+hello           Show the welcome
+help [command]  Show commands or focused help
+clear           Redraw the harness
+quit            Close the session (exit also works)
 
-Bare text is treated as /ask.
+Slash aliases remain compatible: /capture, /network, /checkin, /net, /help, /quit.
+All other built-ins also accept a leading slash. Unknown bare text goes to AI.
+Up/Down recalls command history. Network/status/today accept --json.
 EOF
 }
 
+private_path() {
+  local path="$1" part
+  [[ "$path" == /* && "$path" != *'/../'* && "$path" != */.. ]] || return 1
+  part="$path"
+  while [[ "$part" != / ]]; do
+    [[ ! -L "$part" ]] || return 1
+    part="${part%/*}"; [[ -n "$part" ]] || part=/
+  done
+}
+
+file_metadata() {
+  # BSD stat (macOS) and GNU stat; no platform-specific runtime dependency.
+  local metadata
+  if metadata="$(stat -f '%Lp %l' "$1" 2>/dev/null)"; then printf '%s\n' "$metadata"
+  else stat -c '%a %h' "$1" 2>/dev/null; fi
+}
+
+prepare_history() {
+  local dir="$DATA_HOME/.history"
+  if [[ "${FMC_NO_HISTORY:-0}" == 1 ]]; then
+    HISTORY_PATH=""
+    unset HISTFILE
+    HISTSIZE=500
+    set +o history
+    history -c
+    return 0
+  fi
+  HISTORY_PATH="$dir/commands"
+  private_path "$HISTORY_PATH" || return 1
+  (umask 077; mkdir -p "$dir") || return 1
+  [[ -d "$dir" && -O "$dir" && "$(file_metadata "$dir")" == 700\ * ]] || return 1
+  if [[ ! -e "$HISTORY_PATH" ]]; then
+    (umask 077; set -C; : > "$HISTORY_PATH") || return 1
+  fi
+  safe_history || return 1
+  HISTFILE="$HISTORY_PATH" HISTSIZE=500 HISTFILESIZE=500
+  export HISTFILE HISTSIZE HISTFILESIZE
+  set +o history
+  history -c
+  history -r "$HISTORY_PATH"
+}
+
+safe_history() {
+  private_path "$HISTORY_PATH" && [[ -f "$HISTORY_PATH" && -O "$HISTORY_PATH" && "$(file_metadata "$HISTORY_PATH")" == '600 1' ]] || return 1
+  [[ $(wc -c < "$HISTORY_PATH") -le 1048576 ]]
+}
+
+save_history() {
+  if [[ "${FMC_NO_HISTORY:-0}" == 1 ]]; then history -s -- "$1"; return 0; fi
+  safe_history || { printf 'Error: unsafe history destination; refusing write.\n' >&2; return 1; }
+  history -s -- "$1"
+  history -w "$HISTORY_PATH"
+}
+
+interactive_dispatch() {
+  local line="$1" word text
+  local -a args
+  word="${line%%[[:space:]]*}"
+  text="${line#"$word"}"
+  text="${text#"${text%%[![:space:]]*}"}"
+  word="${word#/}"
+  IFS=$' \t' read -r -a args <<< "$text"
+  case "$word" in
+    "") return 0 ;;
+    online)
+      [[ -z "$text" ]] || { printf 'Usage: online\n' >&2; return 2; }
+      run_online ;;
+    offline)
+      [[ -z "$text" ]] || { printf 'Usage: offline\n' >&2; return 2; }
+      run_offline ;;
+    network)
+      [[ -z "$text" || "$text" == --json ]] || { printf 'Usage: network [--json]\n' >&2; return 2; }
+      local MODE="$text"
+      run_network ;;
+    capture) run_capture "$text" ;;
+    focus)
+      case "$text" in
+        show|clear) run_focus "$text" ;;
+        set\ *) run_focus set "${text#set }" ;;
+        *) run_focus set "$text" ;;
+      esac ;;
+    ask) [[ -z "$text" ]] || run_ask "$text" ;;
+    prompt) run_prompt "$text" ;;
+    help) if [[ -z "$text" ]]; then show_interactive_help; else show_command_help "$text"; fi ;;
+    clear)
+      [[ -z "$NO_COLOR" ]] && printf '\033[2J\033[H'
+      show_coffee_art; run_today ;;
+    quit|exit) return 99 ;;
+    today|done|me|checkin|net|update|ping|doctor|status|config|completion|hello)
+      "$BASH" "${BASH_SOURCE[0]}" "$word" ${args[@]+"${args[@]}"} &
+      REQUEST_PID=$!
+      local result=0
+      wait "$REQUEST_PID" || result=$?
+      REQUEST_PID=""
+      return "$result" ;;
+    *)
+      if [[ "$line" == /* ]]; then printf 'Unknown interactive command: %s\n' "$line" >&2
+      else run_ask "$line"; fi ;;
+  esac
+}
+
 run_interactive() {
-  local line id read_status
+  local line read_status dispatch_status
+  NO_COLOR="${NO_COLOR:-}"
+  HISTORY_PATH=""
+  if [[ -t 0 ]]; then
+    prepare_history || { printf 'Error: unsafe history destination.\n' >&2; return 1; }
+    bind 'set enable-bracketed-paste off' 2>/dev/null || true
+  fi
+  umask 077
+  SESSION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fmc-session.XXXXXX")" || return 1
+  trap 'runtime_cleanup' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  trap 'exit 129' HUP
+  if [[ -n "${FMC_TEST_HEARTBEAT_SECONDS:-}" ]]; then
+    if [[ ! "$FMC_TEST_HEARTBEAT_SECONDS" =~ ^([1-9]|[1-5][0-9]|60)$ ]]; then
+      printf 'Error: FMC_TEST_HEARTBEAT_SECONDS must be an integer from 1 to 60.\n' >&2; return 2
+    fi
+    HEARTBEAT_SECONDS="$FMC_TEST_HEARTBEAT_SECONDS"
+  fi
+  [[ "${1:-}" != online ]] || run_online || return 1
+  update_accent
   show_coffee_art
   run_today || return 1
-  printf '\nType /help for commands. Bare text goes to the AI runner.\n'
+  printf '\nType help for commands (/help also works). Unknown text goes to AI.\n'
   while :; do
-    printf '\nfmc> '
+    update_accent
+    printf '\n%bfmc> %b' "$ACCENT" "$RESET"
     read_status=0
-    IFS= read -r line || read_status=$?
+    if [[ -t 0 ]]; then IFS= read -e -r line || read_status=$?
+    else IFS= read -r line || read_status=$?; fi
     if [[ $read_status -ne 0 && -z "$line" ]]; then
       printf '\nSession closed.\n'
       return 0
     fi
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
-    case "$line" in
-      "") ;;
-      /capture\ *) run_capture "${line#/capture }" ;;
-      /focus\ *) run_focus set "${line#/focus }" ;;
-      /today) run_today ;;
-      /done\ *)
-        id="${line#/done }"
-        run_done "$id"
-        ;;
-      /ask) ;;
-      /ask\ *) run_ask "${line#/ask }" ;;
-      /prompt\ *) run_prompt "${line#/prompt }" ;;
-      /network) run_network ;;
-      /me) run_identity me ;;
-      /checkin) run_identity checkin ;;
-      /net) run_net ;;
-      /update) run_update ;;
-      /ping) run_ping ;;
-      /doctor) run_doctor ;;
-      /help) show_interactive_help ;;
-      /clear)
-        printf '\033[2J\033[H'
-        show_coffee_art
-        run_today
-        ;;
-      /quit|/exit)
-        printf 'Session closed.\n'
-        return 0
-        ;;
-      /*) printf 'Unknown interactive command: %s\n' "$line" >&2 ;;
-      *) run_ask "$line" ;;
-    esac
+    report_availability
+    if [[ -n "$line" && -t 0 ]]; then save_history "$line" || return 1; fi
+    dispatch_status=0
+    interactive_dispatch "$line" || dispatch_status=$?
+    if [[ $dispatch_status -eq 99 ]]; then
+      printf 'Session closed.\n'; return 0
+    fi
     if [[ $read_status -ne 0 ]]; then
       printf 'Session closed.\n'
       return 0
@@ -1118,7 +1312,7 @@ run_completion() {
       cat <<'EOF'
 _founder_mode_coffee() {
   local current="${COMP_WORDS[COMP_CWORD]}"
-  local commands="interactive capture focus today done prompt ask hello ping network me checkin net status doctor config completion update help"
+  local commands="interactive capture focus today done prompt ask hello ping network online offline me checkin net status doctor config completion update help"
   COMPREPLY=( $(compgen -W "$commands --help --version --json --no-color" -- "$current") )
 }
 complete -F _founder_mode_coffee founder-mode-coffee
@@ -1133,7 +1327,7 @@ _founder-mode-coffee() {
     '(-V --version)'{-V,--version}'[show version]' \
     '--json[print JSON]' \
     '--no-color[disable color]' \
-    '1:command:(interactive capture focus today done prompt ask hello ping network me checkin net status doctor config completion update help)'
+    '1:command:(interactive capture focus today done prompt ask hello ping network online offline me checkin net status doctor config completion update help)'
 }
 _founder-mode-coffee "$@"
 EOF
@@ -1145,7 +1339,7 @@ complete -c founder-mode-coffee -s h -l help -d 'Show help'
 complete -c founder-mode-coffee -s V -l version -d 'Show version'
 complete -c founder-mode-coffee -l json -d 'Print JSON'
 complete -c founder-mode-coffee -l no-color -d 'Disable color'
-complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'interactive capture focus today done prompt ask hello ping network me checkin net status doctor config completion update help'
+complete -c founder-mode-coffee -n '__fish_use_subcommand' -a 'interactive capture focus today done prompt ask hello ping network online offline me checkin net status doctor config completion update help'
 EOF
       ;;
     *)
@@ -1270,8 +1464,203 @@ network_error() {
   return 1
 }
 
+SESSION_DIR=""
+RUNTIME_DIR=""
+CURL_PID=""
+WORKER_PID=""
+REQUEST_PID=""
+ONLINE_ACTIVE=false
+LEASE_OWNED=false
+HEARTBEAT_SECONDS=60
+LEASE_SECONDS=300
+ACCENT=""
+
+ensure_identity() {
+  local identity="$CONFIG_HOME/identity" seed token
+  private_path "$identity" || { network_error 'Unsafe private identity destination'; return 1; }
+  (umask 077; mkdir -p "$CONFIG_HOME") || return 1
+  [[ -O "$CONFIG_HOME" ]] || { network_error 'Unsafe private identity directory'; return 1; }
+  if [[ ! -e "$identity" ]]; then
+    seed="$(umask 077; mktemp "$CONFIG_HOME/.identity.XXXXXX")" || return 1
+    token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+    if [[ ! "$token" =~ ^[a-f0-9]{64}$ ]] || ! printf '%s\n' "$token" > "$seed"; then
+      rm -f "$seed"; network_error 'Could not create private identity'; return 1
+    fi
+    ln "$seed" "$identity" 2>/dev/null || true
+    rm -f "$seed"
+  fi
+  [[ -f "$identity" && ! -L "$identity" && -O "$identity" && "$(file_metadata "$identity")" == '600 1' ]] || {
+    network_error 'Unsafe private identity file'; return 1
+  }
+}
+
+run_presence() {
+  local action="${1:-presence}" output="${2:-quiet}" api token temp file code field value limit=15 method=POST
+  local MODE="$MODE"
+  [[ "$output" == --json ]] && MODE=--json
+  if [[ "$action" == presence || "$action" == checkin ]]; then ensure_identity || exit 1; fi
+  if ! private_path "$CONFIG_HOME/identity" || [[ ! -f "$CONFIG_HOME/identity" || ! -O "$CONFIG_HOME/identity" || "$(file_metadata "$CONFIG_HOME/identity")" != '600 1' ]]; then
+    network_error 'No safe private identity; run founder-mode-coffee checkin first'; exit 1
+  fi
+  token="$(<"$CONFIG_HOME/identity")"
+  [[ "$token" =~ ^[a-f0-9]{64}$ ]] || { network_error 'Private identity file is invalid'; exit 1; }
+  api="$(resolved_api)" || { network_error 'Invalid API configuration'; exit 1; }
+  command -v curl >/dev/null 2>&1 || { network_error 'curl is required'; exit 1; }
+  temp="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/fmc-presence.XXXXXX")" || exit 1
+  file="$temp/response"
+  trap 'if [[ -n "$CURL_PID" ]]; then kill "$CURL_PID" 2>/dev/null || true; wait "$CURL_PID" 2>/dev/null || true; fi; rm -rf "$temp"' EXIT
+  trap 'exit 1' HUP INT TERM
+  [[ "$action" == offline ]] && limit=2
+  [[ "$action" != me ]] || method=GET
+  # The credential is stdin data, never a curl argument. Do not follow auth redirects.
+  curl --config - --globoff --silent --show-error --connect-timeout 2 --max-time "$limit" \
+    -X "$method" --output "$file" --write-out '%{http_code}' -- "$api/network/$action" \
+    <<< "header = \"Authorization: Bearer $token\"" > "$temp/code" 2>/dev/null || true
+  code="$(<"$temp/code")"
+  if [[ "$code" != 200 ]]; then
+    [[ -z "$SESSION_DIR" || "$action" != presence ]] || printf 'unavailable\n' > "$SESSION_DIR/status"
+    network_error 'FMC presence unavailable; try again later'; exit 1
+  fi
+  for field in status total_checkins first_seen last_seen; do
+    value=string; [[ "$field" == total_checkins ]] && value=uint
+    if ! capture_json_top_value "$file" "$field" "$value"; then
+      network_error 'FMC presence returned an invalid response'; exit 1
+    fi
+    case "$field" in
+      status)
+        [[ ( "$action" != offline && "$JSON_VALUE" == ok ) || ( "$action" == offline && "$JSON_VALUE" == offline ) ]] || {
+          network_error 'FMC presence returned an invalid status'; exit 1
+        } ;;
+      total_checkins) [[ "$JSON_VALUE" != 0 ]] || { network_error 'FMC presence returned an invalid count'; exit 1; } ;;
+      first_seen|last_seen)
+        valid_timestamp "$JSON_VALUE" || {
+          network_error 'FMC presence returned an invalid timestamp'; exit 1
+        } ;;
+    esac
+  done
+  if [[ -n "$SESSION_DIR" && "$action" == presence ]]; then
+    date +%s > "$temp/confirmed"
+    mv "$temp/confirmed" "$SESSION_DIR/confirmed"
+    printf 'ok\n' > "$SESSION_DIR/status"
+  fi
+  if [[ "$output" == --json ]]; then
+    printf '{'
+    local separator="" kind
+    for field in status total_checkins first_seen last_seen; do
+      kind=string; [[ "$field" == total_checkins ]] && kind=uint
+      capture_json_top_value "$file" "$field" "$kind"
+      printf '%s"%s":' "$separator" "$field"
+      if [[ "$kind" == uint ]]; then printf '%s' "$JSON_VALUE"; else printf '"%s"' "$(json_escape "$JSON_VALUE")"; fi
+      separator=,
+    done
+    printf '}\n'
+  fi
+  if [[ "$output" == "" ]]; then
+    printf '\nYOUR FMC CONNECTION\n'
+    for field in total_checkins first_seen last_seen; do
+      value=string; [[ "$field" == total_checkins ]] && value=uint
+      capture_json_top_value "$file" "$field" "$value"
+      printf '  %-18s %s\n' "${field//_/ }" "$JSON_VALUE"
+    done
+  fi
+  # Exit while locals still exist so the request cleanup trap owns its files.
+  exit 0
+}
+
+refresh_presence() {
+  local result=0
+  (run_presence presence "${1:-quiet}") &
+  REQUEST_PID=$!
+  wait "$REQUEST_PID" || result=$?
+  REQUEST_PID=""
+  [[ $result -ne 0 ]] || LEASE_OWNED=true
+  return "$result"
+}
+
+stop_worker() {
+  if [[ -n "$WORKER_PID" ]]; then
+    kill "$WORKER_PID" 2>/dev/null || true
+    wait "$WORKER_PID" 2>/dev/null || true
+    WORKER_PID=""
+  fi
+}
+
+presence_worker() {
+  local child=""
+  trap 'if [[ -n "$child" ]]; then kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; fi' EXIT
+  trap 'exit 0' HUP INT TERM
+  while :; do
+    sleep "$HEARTBEAT_SECONDS" & child=$!
+    wait "$child" || exit 0; child=""
+    (run_presence presence) & child=$!
+    if ! wait "$child"; then printf 'unavailable\n' > "$SESSION_DIR/status"; fi
+    child=""
+  done
+}
+
+run_online() {
+  refresh_presence || return 1
+  ONLINE_ACTIVE=true
+  if [[ -z "$WORKER_PID" ]]; then
+    (presence_worker) </dev/null >/dev/null 2>&1 & WORKER_PID=$!
+  fi
+  update_accent
+  printf '%bOnline: presence confirmed; heartbeats every %ss.%b\n' "$ACCENT" "$HEARTBEAT_SECONDS" "$RESET"
+}
+
+run_offline() {
+  stop_worker
+  ONLINE_ACTIVE=false
+  # Explicit intent can remove a lease from a previous one-shot invocation.
+  # Unlike automatic cleanup, this does not require session ownership.
+  if [[ -e "$CONFIG_HOME/identity" || -L "$CONFIG_HOME/identity" ]]; then
+    (run_presence offline) & REQUEST_PID=$!
+    wait "$REQUEST_PID" || true
+    REQUEST_PID=""
+  fi
+  LEASE_OWNED=false
+  [[ -z "$SESSION_DIR" ]] || rm -f "$SESSION_DIR/confirmed" "$SESSION_DIR/status"
+  ACCENT="$AMBER"
+  printf '%bOffline locally.%b\n' "$ACCENT" "$RESET"
+}
+
+session_cleanup() {
+  trap - EXIT HUP INT TERM
+  if [[ -n "$REQUEST_PID" ]]; then kill "$REQUEST_PID" 2>/dev/null || true; wait "$REQUEST_PID" 2>/dev/null || true; REQUEST_PID=""; fi
+  stop_worker
+  [[ "$LEASE_OWNED" != true ]] || (run_presence offline) >/dev/null 2>&1 || true
+  [[ -z "$SESSION_DIR" ]] || rm -rf "$SESSION_DIR"
+}
+
+runtime_cleanup() {
+  trap - EXIT HUP INT TERM
+  stop_ai
+  if [[ -n "$REQUEST_PID" ]]; then kill "$REQUEST_PID" 2>/dev/null || true; wait "$REQUEST_PID" 2>/dev/null || true; REQUEST_PID=""; fi
+  if [[ -n "$CURL_PID" ]]; then kill "$CURL_PID" 2>/dev/null || true; wait "$CURL_PID" 2>/dev/null || true; CURL_PID=""; fi
+  [[ -z "$SESSION_DIR" ]] || session_cleanup
+  cleanup_ai_prompt
+  [[ -z "$RUNTIME_DIR" ]] || rm -rf "$RUNTIME_DIR"
+}
+
+update_accent() {
+  local confirmed=0 now
+  ACCENT="$AMBER"
+  if [[ "$ONLINE_ACTIVE" == true && -f "$SESSION_DIR/confirmed" ]]; then
+    IFS= read -r confirmed < "$SESSION_DIR/confirmed" || true
+    now="$(date +%s)"
+    if [[ "$confirmed" =~ ^[0-9]{1,12}$ ]] && ((now >= confirmed && now - confirmed < LEASE_SECONDS)); then ACCENT="$GREEN"; fi
+  fi
+}
+
+report_availability() {
+  if [[ "$ONLINE_ACTIVE" == true && -f "$SESSION_DIR/status" && "$(<"$SESSION_DIR/status")" != ok ]]; then
+    printf 'FMC presence unavailable; retrying. Green expires with the last confirmed lease.\n' >&2
+  fi
+}
+
 run_network() {
   local api file field value
+  refresh_presence || return 1
   api="$(resolved_api)" || return 1
   command -v curl >/dev/null 2>&1 || { network_error 'curl is required'; return 1; }
   file="$(mktemp "${TMPDIR:-/tmp}/fmc-network.XXXXXX")" || return 1
@@ -1283,9 +1672,12 @@ run_network() {
     if ! capture_json_top_value "$file" "$field" "$value"; then
       rm -f "$file"; network_error 'FMC network returned an invalid response'; return 1
     fi
+    if ! validate_network_field "$field" "$JSON_VALUE"; then
+      rm -f "$file"; network_error 'FMC network returned an invalid response'; return 1
+    fi
   done
   if [[ "$MODE" == "--json" ]]; then
-    command cat "$file"
+    emit_contract "$file" status timestamp online_users checked_in_users total_users total_checkins online_window_seconds
   else
     printf '\nFMC NETWORK\n'
     for field in status online_users checked_in_users total_users total_checkins online_window_seconds timestamp; do
@@ -1294,65 +1686,6 @@ run_network() {
       printf '  %-23s %s\n' "${field//_/ }" "$JSON_VALUE"
     done
     printf '\nCounts represent anonymous CLI installations, not verified people.\n'
-  fi
-  rm -f "$file"
-}
-
-run_identity() {
-  local action="$1" identity_file="$CONFIG_HOME/identity" token="" seed api file code field
-  if [[ "$action" == checkin && ! -e "$identity_file" ]]; then
-    mkdir -p "$CONFIG_HOME" || return 1
-    seed="$(umask 077; mktemp "$CONFIG_HOME/.identity.XXXXXX")" || return 1
-    token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-    if [[ ! "$token" =~ ^[a-f0-9]{64}$ ]] || ! printf '%s\n' "$token" > "$seed"; then
-      rm -f "$seed"; network_error 'Could not create private identity'; return 1
-    fi
-    ln "$seed" "$identity_file" 2>/dev/null || true
-    rm -f "$seed"
-  fi
-  if [[ ! -f "$identity_file" || -L "$identity_file" || ! -r "$identity_file" ]]; then
-    network_error 'No private identity; run founder-mode-coffee checkin first'; return 1
-  fi
-  token="$(<"$identity_file")"
-  [[ "$token" =~ ^[a-f0-9]{64}$ ]] || { network_error 'Private identity file is invalid'; return 1; }
-  api="$(resolved_api)" || return 1
-  command -v curl >/dev/null 2>&1 || { network_error 'curl is required'; return 1; }
-  file="$(mktemp "${TMPDIR:-/tmp}/fmc-identity-response.XXXXXX")" || return 1
-  # Send bearer via stdin config rather than exposing it in process arguments.
-  local method=GET
-  [[ "$action" == checkin ]] && method=POST
-  code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl --config - --globoff --silent --show-error --location --connect-timeout 5 --max-time 15 -X "$method" --output "$file" --write-out '%{http_code}' -- "$api/network/$action" 2>/dev/null)" || code=000
-  if [[ "$code" != 200 ]]; then
-    field='FMC network unavailable; try again later'
-    if capture_json_top_value "$file" error string; then field="$JSON_VALUE"; fi
-    rm -f "$file"; network_error "$field"; return 1
-  fi
-  for field in status first_seen last_seen total_checkins; do
-    local kind=string
-    [[ "$field" == total_checkins ]] && kind=uint
-    if ! capture_json_top_value "$file" "$field" "$kind"; then
-      rm -f "$file"; network_error 'FMC network returned an invalid response'; return 1
-    fi
-  done
-  if [[ "$MODE" == --json ]]; then
-    # Emit only the public contract, never additional upstream fields.
-    printf '{'
-    local separator=""
-    for field in status total_checkins first_seen last_seen; do
-      kind=string; [[ "$field" == total_checkins ]] && kind=uint
-      capture_json_top_value "$file" "$field" "$kind"
-      printf '%s"%s":' "$separator" "$field"
-      if [[ "$kind" == uint ]]; then printf '%s' "$JSON_VALUE"; else printf '"%s"' "$(json_escape "$JSON_VALUE")"; fi
-      separator=,
-    done
-    printf '}\n'
-  else
-    printf '\nYOUR FMC CONNECTION\n'
-    for field in total_checkins first_seen last_seen; do
-      kind=string; [[ "$field" == total_checkins ]] && kind=uint
-      capture_json_top_value "$file" "$field" "$kind"
-      printf '  %-18s %s\n' "${field//_/ }" "$JSON_VALUE"
-    done
   fi
   rm -f "$file"
 }
@@ -1476,7 +1809,7 @@ case "$COMMAND" in
       printf 'Error: unknown option for update: %s\n' "${1:-}" >&2; exit 2
     fi
     ;;
-  ping|status|doctor|network|me|checkin|net)
+  ping|status|doctor|network|me|checkin|net|online|offline)
     if (($# > 1)) || [[ -n "${1:-}" && "${1:-}" != "--json" ]]; then
       printf 'Error: unknown option for %s: %s\n' "$COMMAND" "${1:-}" >&2
       exit 2
@@ -1532,9 +1865,30 @@ if [[ "$GLOBAL_JSON" == true || "${1:-}" == "--json" ]]; then
   MODE="--json"
 fi
 
+umask 077
+RUNTIME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fmc-private.XXXXXX")" || { network_error 'Could not create private temporary directory'; exit 1; }
+TMPDIR="$RUNTIME_DIR"
+export TMPDIR
+trap 'runtime_cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 case "$COMMAND" in
+  network|online|offline|me|checkin|ping|doctor)
+    resolved_api >/dev/null 2>&1 || { network_error 'Invalid API configuration; remote API requires HTTPS'; exit 1; } ;;
+esac
+
+case "$COMMAND" in
+  online)
+    if [[ "$MODE" == --json ]]; then refresh_presence --json
+    else run_interactive online; fi ;;
+  offline)
+    (run_presence offline "$MODE") & REQUEST_PID=$!
+    wait "$REQUEST_PID"; result=$?; REQUEST_PID=""; exit "$result" ;;
   network) run_network ;;
-  me|checkin) run_identity "$COMMAND" ;;
+  me|checkin)
+    (run_presence "$COMMAND" "$MODE") & REQUEST_PID=$!
+    wait "$REQUEST_PID"; result=$?; REQUEST_PID=""; exit "$result" ;;
   net) run_net ;;
   help)
     show_command_help "${1:-}"
