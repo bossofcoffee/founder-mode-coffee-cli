@@ -4,11 +4,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEST_TMP="$(mktemp -d)"
 trap 'rm -rf "$TEST_TMP"' EXIT
 mkdir -p "$TEST_TMP/package" "$TEST_TMP/bin"
-printf '#!/usr/bin/env bash\nprintf "founder-mode-coffee 2.4.0\\n"\n' > "$TEST_TMP/package/founder-mode-coffee"
+printf '#!/usr/bin/env bash\nprintf "founder-mode-coffee 2.5.0\\n"\n' > "$TEST_TMP/package/founder-mode-coffee"
 tar -czf "$TEST_TMP/release.tar.gz" -C "$TEST_TMP/package" founder-mode-coffee
 cp "$ROOT/founder-mode-coffee" "$TEST_TMP/bin/founder-mode-coffee"
 PATH="$ROOT/tests/update-fixtures:$PATH" MOCK_UPDATE_ARCHIVE="$TEST_TMP/release.tar.gz" "$TEST_TMP/bin/founder-mode-coffee" update --install
-[[ "$("$TEST_TMP/bin/founder-mode-coffee" --version)" == 'founder-mode-coffee 2.4.0' ]]
+[[ "$("$TEST_TMP/bin/founder-mode-coffee" --version)" == 'founder-mode-coffee 2.5.0' ]]
 printf 'PASS: verified self-update replaces the invoked executable\n'
 cp "$ROOT/founder-mode-coffee" "$TEST_TMP/bin/founder-mode-coffee"
 if PATH="$ROOT/tests/update-fixtures:$PATH" MOCK_UPDATE_ARCHIVE="$TEST_TMP/release.tar.gz" MOCK_CORRUPT=1 "$TEST_TMP/bin/founder-mode-coffee" update --install > "$TEST_TMP/corrupt.out" 2>&1; then

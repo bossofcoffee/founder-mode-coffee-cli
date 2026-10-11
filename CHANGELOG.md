@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.4.0 (unreleased)
+
+- Enforced verified off-host HTTPS, TLS 1.2 minimum, HTTPS-only redirects, and curlrc isolation.
+- Rejected authenticated redirects and unsafe identity files; filtered network contracts and reflected credentials.
+- Moved Hermes prompts from argv to exact stdin query-file input.
+- Added optional memory-only session history and documented plaintext-at-rest/runner security boundaries.
+- Added real TLS and in-flight PTY signal regressions with tracked child cleanup.
+
+- Added native readline Up/Down history with a private, bounded local history file.
+- Made built-in commands work without a slash; retained slash aliases and explicit AI escape via ask.
+- Added opt-in online sessions with quiet 60-second presence heartbeats and lease-aware green styling.
+- Added offline and session cleanup for quit, EOF, interrupt, and termination.
+- Made network refresh presence before reading counts; JSON failures remain nonzero errors.
+- Added real PTY/HTTP-fixture tests for history, privacy, input integrity, availability, and process cleanup.
+
 ## 2.3.0
 
 - Added FMC network counts, explicit anonymous check-in, and private installation stats.

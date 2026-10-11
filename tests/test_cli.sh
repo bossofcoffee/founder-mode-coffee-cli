@@ -25,7 +25,7 @@ assert_contains "$output" "completion"
 printf 'PASS: help exposes modern command discovery\n'
 
 output="$($CLI --version)"
-[[ "$output" == "founder-mode-coffee 2.3.0" ]] || fail "unexpected version output: $output"
+[[ "$output" == "founder-mode-coffee 2.4.0" ]] || fail "unexpected version output: $output"
 printf 'PASS: version is stable and script-friendly\n'
 
 XDG_CONFIG_HOME="$TEST_TMP/config" "$CLI" config set api "http://127.0.0.1:8787/api" >/dev/null
@@ -46,7 +46,7 @@ done
 printf 'PASS: config filesystem failures are fatal and never report success\n'
 
 output="$(FMC_API="https://example.test/api" XDG_CONFIG_HOME="$TEST_TMP/status-config" "$CLI" status --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.3.0"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["command"]=="status"; assert d["version"]=="2.4.0"; assert d["api"]=="https://example.test/api"' "$output" || fail "status did not return valid JSON"
 printf 'PASS: status supports automation-friendly JSON\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" FMC_API="https://api.test/v1" "$CLI" ping --json)"
@@ -71,7 +71,7 @@ assert_contains "$($CLI completion fish)" "complete -c founder-mode-coffee"
 printf 'PASS: completion supports bash, zsh, and fish\n'
 
 output="$(PATH="$ROOT/tests/fixtures:$PATH" "$CLI" update --json)"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.3.0"; assert d["latest"]=="2.4.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.4.0"' "$output" || fail "update check JSON was incorrect"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["current"]=="2.4.0"; assert d["latest"]=="2.5.0"; assert d["update_available"] is True; assert d["url"]=="https://github.com/bossofcoffee/founder-mode-coffee-cli/releases/tag/v2.5.0"' "$output" || fail "update check JSON was incorrect"
 printf 'PASS: update checks the latest GitHub release\n'
 
 output="$(FMC_API="https://example.test/api" "$CLI" --json status)"
@@ -184,11 +184,11 @@ done
 
 for valid_url in \
   'https://example.test/api' \
-  'http://localhost:3000' \
+  'https://localhost:3000' \
   'http://127.0.0.1:8787/api' \
   'https://[2001:db8::1]:443/path' \
   'http://[::1]/api' \
-  'http://[1:2:3:4:5:6:7:8]:65535/api'; do
+  'https://[1:2:3:4:5:6:7:8]:65535/api'; do
   FMC_API="$valid_url" "$CLI" status >/dev/null 2>&1 \
     || fail "valid API URL was rejected: $valid_url"
 done
@@ -200,8 +200,8 @@ output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_CONTROL_ERROR=1 \
 exit_code=$?
 set -e
 [[ $exit_code -eq 1 ]] || fail "control-character curl error returned exit code $exit_code"
-python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["error"] == "bad\x01\t\r\x1f\x7ferror"' "$output" \
-  || fail "curl control characters were not escaped as valid JSON"
+python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert d["error"] == "connection failed"' "$output" \
+  || fail "curl errors must not reflect untrusted content"
 printf 'PASS: JSON output escapes ASCII control characters\n'
 
 for response in \
@@ -233,7 +233,7 @@ structured_ping='{"nested":{"timestamp":"wrong-first","total_pings":98},"message
 output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE="$structured_ping" \
   FMC_API="https://api.test/v1" "$CLI" ping)" \
   || fail "ping rejected structurally valid top-level metadata"
-[[ "$output" == $'pong\nPing 7\ntop\nvalue' ]] \
+[[ "$output" == $'pong\nPing 7' ]] \
   || fail "ping did not structurally extract top-level metadata: $output"
 printf 'PASS: ping structurally extracts only top-level timestamp and total_pings\n'
 
@@ -246,14 +246,14 @@ output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE="$escaped_ping" \
 output="$(PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE="$escaped_ping" \
   FMC_API="https://api.test/v1" "$CLI" ping --json)" \
   || fail "escaped ping response failed in JSON mode"
-[[ "$output" == "$escaped_ping" ]] || fail "ping JSON mode did not preserve the original response"
+python3 -c 'import json,sys; assert json.loads(sys.argv[1])==json.loads(sys.argv[2])' "$output" "$escaped_ping" || fail "ping JSON message changed"
 printf 'PASS: ping decodes JSON member names and message escapes\n'
 
 raw_del_ping=$'{"message":"raw\177del"}'
 output="$(LC_ALL=C PATH="$ROOT/tests/fixtures:$PATH" MOCK_CURL_RESPONSE="$raw_del_ping" \
   FMC_API="https://api.test/v1" "$CLI" ping --json)" \
   || fail "ping rejected raw U+007F in a JSON string"
-[[ "$output" == "$raw_del_ping" ]] || fail "ping JSON mode did not preserve raw U+007F"
+python3 -c 'import json,sys; assert json.loads(sys.argv[1])==json.loads(sys.argv[2])' "$output" "$raw_del_ping" || fail "ping JSON message changed"
 
 for invalid_utf8 in \
   $'{"message":"bad\200"}' \
@@ -429,14 +429,17 @@ printf 'PASS: ask runs a provider-neutral AI executable with founder context on 
 
 mkdir -p "$TEST_TMP/ai-bin"
 # shellcheck disable=SC2016
-printf '%s\n' '#!/usr/bin/env bash' 'for arg in "$@"; do printf "ARG=%s\\n" "$arg" >> "$MOCK_AI_ARGS"; done' 'printf "Hermes response.\\n"' > "$TEST_TMP/ai-bin/hermes"
+printf '%s\n' '#!/usr/bin/env bash' 'for arg in "$@"; do printf "ARG=%s\\n" "$arg" >> "$MOCK_AI_ARGS"; done' 'command cat > "$MOCK_AI_STDIN"' 'printf "Hermes response.\\n"' > "$TEST_TMP/ai-bin/hermes"
 chmod +x "$TEST_TMP/ai-bin/hermes"
 hermes_args="$TEST_TMP/hermes-args"
+# shellcheck disable=SC2016
 output="$(PATH="$TEST_TMP/ai-bin:$PATH" XDG_DATA_HOME="$productivity_data" FMC_AI_RUNNER=hermes \
-  MOCK_AI_ARGS="$hermes_args" "$CLI" ask "Choose the next move")"
+  MOCK_AI_ARGS="$hermes_args" MOCK_AI_STDIN="$TEST_TMP/hermes-stdin" "$CLI" ask 'Choose the next move $(touch never-run); `literal`')"
 [[ "$output" == "Hermes response." ]] || fail "Hermes adapter returned unexpected output: $output"
-assert_contains "$(<"$hermes_args")" $'ARG=chat\nARG=-q'
-assert_contains "$(<"$hermes_args")" "Publish the launch page"
+[[ "$(<"$hermes_args")" == $'ARG=chat\nARG=--query-file\nARG=-' ]] || fail "Hermes prompt appeared in argv"
+# shellcheck disable=SC2016
+XDG_DATA_HOME="$productivity_data" "$CLI" prompt 'Choose the next move $(touch never-run); `literal`' > "$TEST_TMP/hermes-expected"
+cmp "$TEST_TMP/hermes-stdin" "$TEST_TMP/hermes-expected" || fail "Hermes stdin changed prompt bytes"
 printf 'PASS: ask adapts founder context to Hermes non-interactive chat\n'
 
 output="$(XDG_DATA_HOME="$productivity_data" "$CLI" --json today)"
